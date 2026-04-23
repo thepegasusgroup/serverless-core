@@ -17,7 +17,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from supabase import Client
 
-from serverless_core_api.deps import get_service_client, require_api_key
+from serverless_core_api.deps import (
+    get_service_client,
+    get_staff_user,
+    require_api_key,
+)
 from serverless_core_api.services.rental import resume_instance
 from serverless_core_api.services.routing import (
     find_dormant_instance,
@@ -241,6 +245,17 @@ async def completions(
     api_key_id: str = Depends(require_api_key),
 ):
     return await _proxy("/v1/completions", request, sb, api_key_id=api_key_id)
+
+
+# Staff-only alias for the dashboard playground — authenticates via Supabase
+# JWT instead of requiring an sc_live_ API key. Logs with api_key_id=null.
+@router.post("/admin/playground/chat")
+async def playground_chat(
+    request: Request,
+    sb: Client = Depends(get_service_client),
+    _user: dict = Depends(get_staff_user),
+):
+    return await _proxy("/v1/chat/completions", request, sb, api_key_id=None)
 
 
 @router.get("/v1/models")
