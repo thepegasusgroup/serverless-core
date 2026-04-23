@@ -265,6 +265,47 @@ async def destroy(
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
 
 
+@router.get("/instances/{instance_id}/debug")
+async def instance_debug(
+    instance_id: str,
+    request: Request,
+    sb: Client = Depends(get_service_client),
+) -> dict:
+    """Fetch everything we know about an instance — DB row + live vast state."""
+    res = sb.table("instances").select("*").eq("id", instance_id).limit(1).execute()
+    if not res.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Instance not found")
+    row = res.data[0]
+
+    # Strip the vLLM key from public output — it's a secret.
+    row = {k: ("<redacted>" if k == "vllm_api_key" and v else v) for k, v in row.items()}
+
+    vast_info: dict = {}
+    contract_id = row.get("vast_contract_id")
+    if contract_id:
+        vast: VastClient = request.app.state.vast
+        try:
+            info = await vast.show_instance(int(contract_id))
+            full = info.get("instances", info) if isinstance(info, dict) else {}
+            # Pick a useful subset — full response has ~120 fields.
+            keep = [
+                "actual_status", "cur_state", "next_state", "status_msg",
+                "machine_id", "host_id", "hosting_type",
+                "cpu_name", "cpu_util", "cpu_cores", "cpu_ghz",
+                "gpu_name", "gpu_util", "gpu_temp", "gpu_ram", "num_gpus",
+                "mem_usage", "disk_usage",
+                "inet_down", "inet_up", "geolocation",
+                "dph_total", "start_date", "end_date",
+                "driver_version", "cuda_max_good",
+                "public_ipaddr", "ssh_host", "ssh_port",
+            ]
+            vast_info = {k: full.get(k) for k in keep if k in full}
+        except Exception as e:  # noqa: BLE001
+            vast_info = {"_error": str(e)}
+
+    return {"row": row, "vast": vast_info}
+
+
 @router.get("/instances/{instance_id}/logs")
 async def instance_logs(
     instance_id: str,

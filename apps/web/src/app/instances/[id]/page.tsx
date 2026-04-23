@@ -38,6 +38,8 @@ export default function InstanceDetailPage() {
   const [logsLoading, setLogsLoading] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [destroying, setDestroying] = useState(false);
+  const [debug, setDebug] = useState<{ row: Record<string, unknown>; vast: Record<string, unknown> } | null>(null);
+  const [showDebug, setShowDebug] = useState(false);
   const logRef = useRef<HTMLPreElement>(null);
 
   const fetchInstance = useCallback(async () => {
@@ -69,6 +71,18 @@ export default function InstanceDetailPage() {
     }
   }, [id]);
 
+  const fetchDebug = useCallback(async () => {
+    try {
+      const res = await api<{ row: Record<string, unknown>; vast: Record<string, unknown> }>(
+        `/admin/instances/${id}/debug`,
+      );
+      setDebug(res);
+    } catch (e) {
+      // silent — debug is optional
+      console.warn("debug fetch failed", e);
+    }
+  }, [id]);
+
   useEffect(() => {
     fetchInstance();
     fetchLogs();
@@ -90,9 +104,16 @@ export default function InstanceDetailPage() {
 
   useEffect(() => {
     if (!autoRefresh) return;
-    const t = setInterval(fetchLogs, LOG_POLL_MS);
+    const t = setInterval(() => {
+      fetchLogs();
+      fetchDebug();
+    }, LOG_POLL_MS);
     return () => clearInterval(t);
-  }, [autoRefresh, fetchLogs]);
+  }, [autoRefresh, fetchLogs, fetchDebug]);
+
+  useEffect(() => {
+    fetchDebug();
+  }, [fetchDebug]);
 
   const destroy = async () => {
     if (!confirm("Destroy this instance? Stops vast.ai billing immediately."))
@@ -192,8 +213,53 @@ export default function InstanceDetailPage() {
             {logsLoading ? "loading…" : logs || "(no logs yet)"}
           </pre>
         </section>
+
+        {/* Debug panel */}
+        {debug && (
+          <section className="mt-6">
+            <button
+              onClick={() => setShowDebug((v) => !v)}
+              className="text-xs text-zinc-500 hover:text-zinc-200 underline"
+            >
+              {showDebug ? "Hide debug info" : "Show debug info"}
+            </button>
+            {showDebug && (
+              <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-4">
+                <DebugPanel title="Our DB row" data={debug.row} />
+                <DebugPanel title="Live vast.ai state" data={debug.vast} />
+              </div>
+            )}
+          </section>
+        )}
       </main>
     </AppShell>
+  );
+}
+
+function DebugPanel({
+  title,
+  data,
+}: {
+  title: string;
+  data: Record<string, unknown>;
+}) {
+  const entries = Object.entries(data).filter(([, v]) => v !== null && v !== "");
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4">
+      <div className="text-xs uppercase tracking-wider text-zinc-500 mb-2">
+        {title}
+      </div>
+      <dl className="space-y-1 text-xs font-mono">
+        {entries.map(([k, v]) => (
+          <div key={k} className="flex gap-2">
+            <dt className="text-zinc-500 min-w-[140px]">{k}</dt>
+            <dd className="text-zinc-200 break-all">
+              {typeof v === "object" ? JSON.stringify(v) : String(v)}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </div>
   );
 }
 
