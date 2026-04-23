@@ -9,13 +9,13 @@ import { api } from "@/lib/api";
 
 type Model = { id: string; slug: string; hf_repo: string };
 
-const SYSTEM_STORAGE = "sc_playground_system";
-const USER_STORAGE = "sc_playground_user";
+const SYSTEM_STORAGE = "sc_run_system";
+const USER_STORAGE = "sc_run_user";
 
 const DEFAULT_SYSTEM = "You are a helpful assistant. Answer concisely.";
 const DEFAULT_USER = "Write a short haiku about serverless GPUs.";
 
-export default function PlaygroundPage() {
+export default function RunPage() {
   const [models, setModels] = useState<Model[]>([]);
   const [modelSlug, setModelSlug] = useState("");
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM);
@@ -178,9 +178,9 @@ export default function PlaygroundPage() {
         {/* top bar */}
         <header className="mb-4 flex items-center justify-between gap-4 flex-wrap">
           <div>
-            <h1 className="text-2xl font-semibold">Playground</h1>
+            <h1 className="text-2xl font-semibold">Run</h1>
             <p className="text-xs text-zinc-500 mt-0.5">
-              Logged-in staff only · no API key needed · calls hit{" "}
+              Staff test console · auth via your Supabase session · calls hit{" "}
               <code className="text-zinc-300">/admin/playground/chat</code>
             </p>
           </div>
