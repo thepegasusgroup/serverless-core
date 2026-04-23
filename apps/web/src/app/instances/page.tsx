@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { createClient } from "@/lib/supabase/client";
 import { api } from "@/lib/api";
@@ -24,6 +25,7 @@ type Instance = {
 };
 
 export default function InstancesPage() {
+  const router = useRouter();
   const [instances, setInstances] = useState<Instance[]>([]);
   const [loading, setLoading] = useState(true);
   const [destroying, setDestroying] = useState<string | null>(null);
@@ -154,7 +156,8 @@ export default function InstancesPage() {
                   return (
                     <tr
                       key={row.id}
-                      className="border-t border-zinc-800 hover:bg-zinc-900/30 transition-colors"
+                      onClick={() => router.push(`/instances/${row.id}`)}
+                      className="border-t border-zinc-800 hover:bg-zinc-900/30 transition-colors cursor-pointer"
                     >
                       <td className="px-4 py-3 font-mono text-xs text-zinc-300">
                         {row.id.slice(0, 8)}
@@ -181,7 +184,10 @@ export default function InstancesPage() {
                       <td className="px-4 py-3 text-xs text-zinc-400 tabular-nums">
                         {fmtTime(row.last_heartbeat_at)}
                       </td>
-                      <td className="px-4 py-3 text-right">
+                      <td
+                        className="px-4 py-3 text-right"
+                        onClick={(e) => e.stopPropagation()}
+                      >
                         {isActive && (
                           <button
                             onClick={() => destroy(row.id)}
