@@ -11,11 +11,11 @@ set -Eeuo pipefail
 VLLM_ARGS="${VLLM_ARGS:-}"
 
 echo "[entrypoint] starting vLLM with: ${VLLM_ARGS}"
-python -m vllm.entrypoints.openai.api_server ${VLLM_ARGS} &
+python3 -m vllm.entrypoints.openai.api_server ${VLLM_ARGS} &
 VLLM_PID=$!
 
 echo "[entrypoint] starting sc-agent"
-python -m agent.main &
+python3 -m agent.main &
 AGENT_PID=$!
 
 cleanup() {
