@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import secrets
 from typing import Any
 from uuid import uuid4
 
@@ -44,11 +45,17 @@ async def rent_instance(
     model = res.data[0]
 
     instance_id = str(uuid4())
-    vllm_args = _build_vllm_args(model["hf_repo"], model.get("vllm_args") or {})
+    # Per-instance vLLM API key. vLLM enforces `Authorization: Bearer <key>`
+    # on every /v1/* call when --api-key is set, so only our proxy (which
+    # stores the key) can reach the box — scanning the public IP gets 401.
+    vllm_api_key = "sc_inst_" + secrets.token_urlsafe(24)
+    vllm_args = (
+        _build_vllm_args(model["hf_repo"], model.get("vllm_args") or {})
+        + f" --api-key {vllm_api_key}"
+    )
     # vast.ai packs docker-run flags into the env dict — port mappings are
     # represented as keys like "-p 8000:8000". Without this, vLLM's HTTP
-    # server on :8000 isn't reachable from outside the rented box, which
-    # breaks the proxy in M2.5.
+    # server on :8000 isn't reachable from outside the rented box.
     env = {
         "-p 8000:8000": "1",
         "SC_CONTROL_URL": settings.public_api_url,
@@ -84,6 +91,7 @@ async def rent_instance(
         "vast_contract_id": contract_id,
         "model_id": model["id"],
         "status": "provisioning",
+        "vllm_api_key": vllm_api_key,
         "rent_args": {"offer_id": offer_id, "vast_response": vast_res, "label": label},
     }
     insert = sb.table("instances").insert(row).execute()

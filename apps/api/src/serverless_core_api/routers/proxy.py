@@ -29,10 +29,10 @@ def _upstream_url(ip: str, port: int, path: str) -> str:
 
 
 async def _stream_from_upstream(
-    url: str, body: dict[str, Any]
+    url: str, body: dict[str, Any], headers: dict[str, str]
 ) -> AsyncGenerator[bytes, None]:
     async with httpx.AsyncClient(timeout=None) as client:
-        async with client.stream("POST", url, json=body) as r:
+        async with client.stream("POST", url, json=body, headers=headers) as r:
             if r.status_code >= 400:
                 text = (await r.aread()).decode(errors="replace")
                 yield (
@@ -70,9 +70,16 @@ async def _proxy(
     url = _upstream_url(instance["ip"], instance["port"], path)
     is_stream = bool(body.get("stream"))
 
+    # Per-instance vLLM key for boxes rented with --api-key. Older instances
+    # (null column) just get no Authorization header and still work.
+    upstream_headers: dict[str, str] = {}
+    vllm_key = instance.get("vllm_api_key")
+    if vllm_key:
+        upstream_headers["Authorization"] = f"Bearer {vllm_key}"
+
     if is_stream:
         return StreamingResponse(
-            _stream_from_upstream(url, body),
+            _stream_from_upstream(url, body, upstream_headers),
             media_type="text/event-stream",
             headers={
                 "X-Accel-Buffering": "no",
@@ -82,7 +89,7 @@ async def _proxy(
 
     async with httpx.AsyncClient(timeout=None) as client:
         try:
-            r = await client.post(url, json=body)
+            r = await client.post(url, json=body, headers=upstream_headers)
         except httpx.HTTPError as e:
             logger.warning("Upstream %s failed: %s", url, e)
             raise HTTPException(
