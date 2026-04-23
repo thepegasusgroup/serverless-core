@@ -47,8 +47,8 @@ def build_offer_query(
     if min_inet_down_mbps is not None:
         q["inet_down"] = {"gte": min_inet_down_mbps}
     if datacenter_only:
-        # Restrict to hosts marked as datacenter (not consumer/home rigs).
-        q["datacenter"] = {"eq": True}
+        # vast.ai uses `hosting_type` int: 0 = consumer/rig, 1 = datacenter.
+        q["hosting_type"] = {"eq": 1}
     return q
 
 
