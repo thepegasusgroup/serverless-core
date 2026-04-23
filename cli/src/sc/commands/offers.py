@@ -11,13 +11,16 @@ console = Console()
 
 
 def search(
-    gpu: Optional[str] = typer.Option(None, "--gpu", help="GPU name, e.g. RTX_4090"),
+    gpu: Optional[str] = typer.Option(None, "--gpu", help="GPU name, e.g. RTX_5090"),
     max_dph: Optional[float] = typer.Option(None, "--max-dph", help="Max $/hr"),
     min_vram: Optional[int] = typer.Option(
         None, "--min-vram", help="Min VRAM per GPU in GB"
     ),
     num_gpus: int = typer.Option(1, "--num-gpus"),
     min_reliability: float = typer.Option(0.95, "--min-reliability"),
+    region: Optional[str] = typer.Option(
+        None, "--region", help="'eu' | 'us' | 'na'"
+    ),
     limit: int = typer.Option(20, "--limit"),
     json_output: bool = typer.Option(False, "--json", help="Emit raw JSON"),
 ) -> None:
@@ -38,6 +41,8 @@ def search(
         params["max_dph"] = max_dph
     if min_vram is not None:
         params["min_vram"] = min_vram
+    if region:
+        params["region"] = region
 
     url = cfg.api_url.rstrip("/") + "/admin/offers"
     headers = {"Authorization": f"Bearer {cfg.jwt}"}

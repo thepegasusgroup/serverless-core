@@ -23,7 +23,9 @@ def build_offer_query(
         "rentable": {"eq": rentable},
     }
     if gpu:
-        q["gpu_name"] = {"eq": gpu}
+        # vast.ai stores GPU names with spaces (e.g. "RTX 5090"); underscores
+        # are more shell-friendly so we accept either form.
+        q["gpu_name"] = {"eq": gpu.replace("_", " ")}
     if max_dph is not None:
         q["dph_total"] = {"lt": max_dph}
     if min_vram_gb is not None:

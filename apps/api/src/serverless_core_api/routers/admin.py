@@ -8,6 +8,23 @@ from serverless_core_api.models.offer import Offer
 from serverless_core_api.services.rental import destroy_instance, rent_instance
 from serverless_core_api.vast import VastClient, build_offer_query
 
+_REGION_SETS: dict[str, set[str]] = {
+    "eu": {
+        "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE",
+        "GR", "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT",
+        "RO", "SK", "SI", "ES", "SE", "IS", "NO", "LI", "CH", "GB", "UA",
+    },
+    "us": {"US"},
+    "na": {"US", "CA"},
+}
+
+
+def _country_code(offer: dict) -> str:
+    g = offer.get("geolocation") or ""
+    if "," in g:
+        return g.rsplit(",", 1)[-1].strip().upper()
+    return g.strip().upper()
+
 router = APIRouter(
     prefix="/admin",
     tags=["admin"],
@@ -18,11 +35,12 @@ router = APIRouter(
 @router.get("/offers", response_model=list[Offer])
 async def list_offers(
     request: Request,
-    gpu: str | None = Query(default=None, description="vast.ai gpu_name, e.g. RTX_4090"),
+    gpu: str | None = Query(default=None, description="vast.ai gpu_name, e.g. RTX_5090"),
     max_dph: float | None = Query(default=None),
     min_vram: int | None = Query(default=None, description="Min VRAM per GPU in GB"),
     num_gpus: int = Query(default=1, ge=1, le=8),
     min_reliability: float = Query(default=0.95, ge=0.0, le=1.0),
+    region: str | None = Query(default=None, description="'eu' | 'us' | 'na' | none"),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> list[Offer]:
     vast: VastClient = request.app.state.vast
@@ -39,6 +57,15 @@ async def list_offers(
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY, f"vast.ai search failed: {e}"
         ) from e
+
+    if region:
+        target = _REGION_SETS.get(region.lower())
+        if target is None:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"Unknown region '{region}' (use eu, us, na, or omit)",
+            )
+        raw = [o for o in raw if _country_code(o) in target]
 
     offers = [Offer.from_vast(o) for o in raw]
     offers.sort(key=lambda o: o.dph)
