@@ -1,0 +1,13 @@
+# Minimal Supabase CLI config. For full local dev (supabase start), run
+# `supabase init --force` which will regenerate this with all sections.
+# For cloud-only use (our M1 path), this is enough.
+
+project_id = "serverless-core"
+
+[db]
+major_version = 15
+
+[api]
+enabled = true
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
