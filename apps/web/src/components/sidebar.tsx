@@ -29,7 +29,7 @@ const groups: {
     items: [
       { href: "/instances", label: "Instances", icon: Server },
       { href: "/instances/new", label: "Rent", icon: Plus },
-      { href: "/playground", label: "Playground", icon: Terminal },
+      { href: "/run", label: "Run", icon: Terminal },
     ],
   },
   {
