@@ -24,6 +24,11 @@ from serverless_core_api.deps import (
     get_staff_user,
     require_api_key,
 )
+from serverless_core_api.services.pipeline_exec import (
+    apply_transform,
+    merge_usage,
+    render,
+)
 from serverless_core_api.services.rental import resume_instance
 from serverless_core_api.services.routing import (
     find_dormant_instance,
@@ -292,6 +297,70 @@ async def _post_webhook(
         return r.status_code
 
 
+def _extract_last_user_content(messages: list[dict[str, Any]]) -> str:
+    for m in reversed(messages or []):
+        if m.get("role") == "user":
+            content = m.get("content", "")
+            # content can be a string or a list of parts (OpenAI vision spec);
+            # we treat lists as stringified fallback.
+            return content if isinstance(content, str) else str(content)
+    return ""
+
+
+async def _run_model_step(
+    step: dict[str, Any],
+    context: dict[str, str],
+    request: Request,
+    sb: Client,
+    principal: ApiPrincipal | None,
+    api_key_id: str | None,
+) -> tuple[str, dict[str, Any]]:
+    """Execute one `kind=model` step. Returns (text_output, usage_dict)."""
+    rendered_user = render(step.get("user_template") or "{{input}}", context)
+    system = render(step.get("system") or "", context)
+    messages: list[dict[str, Any]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": rendered_user})
+
+    body: dict[str, Any] = {
+        "model": step["model_slug"],
+        "messages": messages,
+        "stream": False,
+    }
+    for k, v in (step.get("vllm_overrides") or {}).items():
+        body[k] = v
+
+    resp_fmt = step.get("response_format") or "text"
+    if resp_fmt == "json_object":
+        body["response_format"] = {"type": "json_object"}
+    elif resp_fmt == "json_schema" and step.get("response_schema"):
+        body["response_format"] = {
+            "type": "json_schema",
+            "json_schema": step["response_schema"],
+        }
+
+    response = await _proxy_with_body(
+        "/v1/chat/completions", body, request, sb,
+        api_key_id=api_key_id, principal=principal,
+    )
+    if not isinstance(response, Response):
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Step got a stream")
+    try:
+        data = json.loads(response.body.decode())
+    except Exception as e:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, f"Step response not JSON: {e}"
+        ) from e
+    if response.status_code >= 400:
+        err = data.get("error") or data
+        raise HTTPException(response.status_code, f"Step upstream error: {err}")
+    content = ((data.get("choices") or [{}])[0].get("message") or {}).get(
+        "content", ""
+    )
+    return content, data.get("usage") or {}
+
+
 async def _run_pipeline(
     slug: str,
     body: dict[str, Any],
@@ -300,9 +369,7 @@ async def _run_pipeline(
     principal: ApiPrincipal | None,
     api_key_id: str | None,
 ):
-    """Core pipeline logic — shared by the API-key-auth'd `/v1/pipelines/*`
-    and the staff-auth'd playground alias.
-    """
+    """Execute a pipeline as a chain of steps, return final output."""
     res = (
         sb.table("pipelines")
         .select("*")
@@ -316,79 +383,74 @@ async def _run_pipeline(
             status.HTTP_404_NOT_FOUND, f"Pipeline '{slug}' not found or disabled"
         )
     pipe = res.data[0]
+    steps = pipe.get("steps") or []
+    if not isinstance(steps, list) or len(steps) == 0:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Pipeline '{slug}' has no steps configured",
+        )
 
-    # ---------------- INPUT stage ----------------
-    messages = body.get("messages") or []
-    messages = _apply_user_template(messages, pipe.get("user_template"))
-    if pipe.get("system_prompt"):
-        if not messages or messages[0].get("role") != "system":
-            messages = [
-                {"role": "system", "content": pipe["system_prompt"]},
-                *messages,
-            ]
-    body["messages"] = messages
+    # Starting input = last user message (ignore any system the client sent;
+    # pipeline steps own system messages).
+    user_input = _extract_last_user_content(body.get("messages") or [])
+    context: dict[str, str] = {"input": user_input, "prev": user_input}
 
-    # ---------------- PROCESS stage --------------
-    body["model"] = pipe["model_slug"]
-    for k, v in (pipe.get("vllm_overrides") or {}).items():
-        body[k] = v  # e.g. temperature, max_tokens
+    usage_acc: dict[str, int] = {}
+    last_output = user_input
 
-    resp_fmt = pipe.get("response_format") or "text"
-    if resp_fmt == "json_object":
-        body["response_format"] = {"type": "json_object"}
-    elif resp_fmt == "json_schema":
-        if not pipe.get("response_schema"):
+    for idx, step in enumerate(steps, start=1):
+        kind = step.get("kind")
+        if kind == "model":
+            text, usage = await _run_model_step(
+                step, context, request, sb, principal, api_key_id
+            )
+            merge_usage(usage_acc, usage)
+            last_output = text
+        elif kind == "transform":
+            try:
+                last_output = apply_transform(step, last_output)
+            except Exception as e:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"Step {idx} transform failed: {e}",
+                ) from e
+        else:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
-                "pipeline set to json_schema but response_schema is empty",
+                f"Step {idx} has unknown kind '{kind}'",
             )
-        body["response_format"] = {
-            "type": "json_schema",
-            "json_schema": pipe["response_schema"],
-        }
+        context[f"step_{idx}"] = last_output
+        context["prev"] = last_output
+
+    # Build an OpenAI-compatible response wrapper around the final text.
+    final_payload = {
+        "id": f"pipe-{slug}-{int(time.time()*1000)}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": f"pipeline:{slug}",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": last_output},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": usage_acc or None,
+    }
 
     output_mode = pipe.get("output_mode") or "return"
 
-    # Webhook + json_only need the full response — force non-streaming.
-    if output_mode in ("webhook", "json_only"):
-        body["stream"] = False
-
-    # ---------------- OUTPUT stage ---------------
     if output_mode == "return":
-        return await _proxy_with_body(
-            "/v1/chat/completions", body, request, sb,
-            api_key_id=api_key_id, principal=principal,
-        )
-
-    # Non-streaming output modes: get the full response first.
-    response = await _proxy_with_body(
-        "/v1/chat/completions", body, request, sb,
-        api_key_id=api_key_id, principal=principal,
-    )
-    # _proxy_with_body returns a starlette Response; pull JSON out.
-    if not isinstance(response, Response):
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY, "Upstream returned a stream when a body was expected"
-        )
-    try:
-        data = json.loads(response.body.decode())
-    except Exception as e:
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY, f"Upstream response was not JSON: {e}"
-        ) from e
+        return JSONResponse(final_payload)
 
     if output_mode == "json_only":
-        content = ((data.get("choices") or [{}])[0].get("message") or {}).get(
-            "content", ""
-        )
         try:
-            parsed = json.loads(content)
+            return JSONResponse(json.loads(last_output))
         except Exception as e:
             raise HTTPException(
                 status.HTTP_502_BAD_GATEWAY,
-                f"Model did not return valid JSON: {e}",
+                f"Final step output was not valid JSON: {e}",
             ) from e
-        return JSONResponse(parsed)
 
     # output_mode == "webhook"
     url = pipe.get("webhook_url")
@@ -399,11 +461,11 @@ async def _run_pipeline(
         )
     hdrs = pipe.get("webhook_headers") or {}
     try:
-        webhook_status = await _post_webhook(url, hdrs, data)
+        webhook_status = await _post_webhook(url, hdrs, final_payload)
     except Exception as e:
         logger.warning("webhook POST to %s failed: %s", url, e)
         return JSONResponse(
-            {"ok": False, "webhook_error": str(e), "response": data},
+            {"ok": False, "webhook_error": str(e), "payload": final_payload},
             status_code=502,
         )
     return JSONResponse(
@@ -411,7 +473,7 @@ async def _run_pipeline(
             "ok": True,
             "webhook_url": url,
             "webhook_status": webhook_status,
-            "usage": data.get("usage"),
+            "usage": final_payload["usage"],
         }
     )
 

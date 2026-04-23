@@ -260,33 +260,39 @@ def delete_model(
 class PipelineIn(BaseModel):
     slug: str
     label: str
-    model_slug: str
-    system_prompt: str | None = None
-    user_template: str | None = None
-    vllm_overrides: dict = {}
-    response_format: str = "text"
-    response_schema: dict | None = None
+    # v3: step chain. Each step: {kind, ...config}
+    steps: list[dict] = []
+    # output stage (applied to final step's text)
     output_mode: str = "return"
     webhook_url: str | None = None
     webhook_headers: dict = {}
     timeout_seconds: int = 120
     enabled: bool = True
+    # Legacy single-step fields (kept for backwards compatibility with v2 DB
+    # rows; new pipelines should use `steps`).
+    model_slug: str | None = None
+    system_prompt: str | None = None
+    user_template: str | None = None
+    vllm_overrides: dict = {}
+    response_format: str = "text"
+    response_schema: dict | None = None
 
 
 class PipelinePatch(BaseModel):
     slug: str | None = None
     label: str | None = None
+    steps: list[dict] | None = None
+    output_mode: str | None = None
+    webhook_url: str | None = None
+    webhook_headers: dict | None = None
+    timeout_seconds: int | None = None
+    enabled: bool | None = None
     model_slug: str | None = None
     system_prompt: str | None = None
     user_template: str | None = None
     vllm_overrides: dict | None = None
     response_format: str | None = None
     response_schema: dict | None = None
-    output_mode: str | None = None
-    webhook_url: str | None = None
-    webhook_headers: dict | None = None
-    timeout_seconds: int | None = None
-    enabled: bool | None = None
 
 
 @router.get("/pipelines")
