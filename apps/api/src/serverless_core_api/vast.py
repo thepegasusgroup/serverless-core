@@ -143,17 +143,17 @@ class VastClient:
         # 2. Fetch from the signed URL (different host, no auth header).
         import httpx as _httpx  # local import to avoid top-level churn
 
+        import asyncio as _asyncio
+
         async with _httpx.AsyncClient(timeout=30.0) as anon:
-            # Vast signed URLs sometimes 404 momentarily while the blob is
-            # being uploaded; retry a handful of times.
-            for _ in range(6):
+            # S3 returns 403 (and sometimes 404) while the blob is being
+            # uploaded. Retry a handful of times with backoff.
+            for attempt in range(10):
                 resp = await anon.get(log_url)
                 if resp.status_code == 200:
                     return resp.text
-                if resp.status_code == 404:
-                    import asyncio as _asyncio
-
-                    await _asyncio.sleep(1.0)
+                if resp.status_code in (403, 404):
+                    await _asyncio.sleep(0.5 + attempt * 0.3)
                     continue
                 resp.raise_for_status()
-        return ""
+        return "(logs not yet available — try again in a few seconds)"
