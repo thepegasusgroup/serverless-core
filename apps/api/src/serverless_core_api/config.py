@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     vast_api_key: str
     agent_shared_secret: str
 
+    # Optional Hugging Face token. Unauthenticated HF pulls are rate-limited;
+    # a read-scoped token makes vLLM's model weight download 3-5× faster.
+    hf_token: str | None = None
+
     public_api_url: str = "http://localhost:8000"
     cors_allowed_origins: str = "http://localhost:3000"
 

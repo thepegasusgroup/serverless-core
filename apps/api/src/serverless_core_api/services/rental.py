@@ -64,6 +64,9 @@ async def rent_instance(
         "SC_MODEL_SLUG": model["slug"],
         "VLLM_ARGS": vllm_args,
     }
+    if settings.hf_token:
+        # vLLM + huggingface_hub auto-pick this up; gives 3-5x faster downloads.
+        env["HF_TOKEN"] = settings.hf_token
 
     label = f"sc-{model['slug']}-{instance_id[:8]}"
     # vLLM's image unpacks to ~35-40GB (CUDA + PyTorch + compiled kernels)
