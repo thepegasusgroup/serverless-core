@@ -1,22 +1,28 @@
 """Background task that polls vast.ai for each in-flight instance and writes
-a human-readable stage message back to Supabase. The dashboard subscribes to
-the `instances` table via Realtime so users see updates live.
+a human-readable stage message back to Supabase. Also detects when an
+instance has been destroyed on the vast side (e.g., manually deleted in
+their dashboard) and flips our row to `destroyed` so the UI stays in sync.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
+import httpx
 from supabase import Client
 
 from serverless_core_api.vast import VastClient
 
 logger = logging.getLogger("serverless_core_api.status_poller")
 
-# Statuses whose vast.ai state we keep watching.
-_ACTIVE_STATUSES = ("provisioning", "booting")
+# All non-terminal statuses; we watch each for vast-side drift.
+_ACTIVE_STATUSES = ("provisioning", "booting", "ready", "unhealthy")
 POLL_INTERVAL_S = 15.0
+
+# vast.ai actual_status values that mean the box is gone for good.
+_VAST_TERMINAL_STATES = {"destroyed", "exited"}
 
 
 def _short(s: str | None, limit: int = 120) -> str:
@@ -48,14 +54,30 @@ def build_stage_msg(vast_info: dict[str, Any], our_status: str) -> str:
     return raw or actual or ""
 
 
+def _mark_destroyed(sb: Client, row_id: str, reason: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    sb.table("instances").update(
+        {"status": "destroyed", "destroyed_at": now, "stage_msg": reason}
+    ).eq("id", row_id).neq("status", "destroyed").execute()
+    logger.info("Instance %s marked destroyed: %s", row_id, reason)
+
+
 async def _poll_one(
     vast: VastClient, sb: Client, row: dict[str, Any]
 ) -> None:
     cid = row.get("vast_contract_id")
     if not cid:
         return
+
     try:
         info = await vast.show_instance(int(cid))
+    except httpx.HTTPStatusError as e:
+        # 404 → vast no longer has this instance (manually deleted, expired, etc).
+        if e.response.status_code == 404:
+            _mark_destroyed(sb, row["id"], "Destroyed on vast.ai (gone from their API)")
+        else:
+            logger.debug("show_instance(%s) HTTP %s", cid, e.response.status_code)
+        return
     except Exception as e:  # noqa: BLE001
         logger.debug("show_instance(%s) failed: %s", cid, e)
         return
@@ -64,8 +86,14 @@ async def _poll_one(
     if not isinstance(i, dict):
         return
 
+    vast_actual = (i.get("actual_status") or "").lower()
+    if vast_actual in _VAST_TERMINAL_STATES:
+        _mark_destroyed(
+            sb, row["id"], f"vast.ai reports actual_status={vast_actual}"
+        )
+        return
+
     stage_msg = build_stage_msg(i, row.get("status", ""))
-    vast_actual = i.get("actual_status")
 
     patch: dict[str, Any] = {}
     if stage_msg != row.get("stage_msg"):
