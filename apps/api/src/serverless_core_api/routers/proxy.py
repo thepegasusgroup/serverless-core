@@ -9,6 +9,7 @@ M2.5 scope: no auth yet (M5 adds API keys).
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, AsyncGenerator
 
 import httpx
@@ -33,6 +34,40 @@ def _upstream_url(ip: str, port: int, path: str) -> str:
     return f"http://{ip}:{port}{path}"
 
 
+def _log_request(
+    sb: Client,
+    *,
+    api_key_id: str | None,
+    instance_id: str | None,
+    model_slug: str | None,
+    path: str,
+    streaming: bool,
+    status_code: int,
+    latency_ms: int,
+    usage: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> None:
+    """Write one row to request_logs. Swallows all errors."""
+    try:
+        sb.table("request_logs").insert(
+            {
+                "api_key_id": api_key_id,
+                "instance_id": instance_id,
+                "model_slug": model_slug,
+                "path": path,
+                "streaming": streaming,
+                "status_code": status_code,
+                "latency_ms": latency_ms,
+                "prompt_tokens": (usage or {}).get("prompt_tokens"),
+                "completion_tokens": (usage or {}).get("completion_tokens"),
+                "total_tokens": (usage or {}).get("total_tokens"),
+                "error": error,
+            }
+        ).execute()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("request log insert failed: %s", e)
+
+
 async def _stream_from_upstream(
     url: str, body: dict[str, Any], headers: dict[str, str]
 ) -> AsyncGenerator[bytes, None]:
@@ -50,15 +85,31 @@ async def _stream_from_upstream(
 
 
 async def _proxy(
-    path: str, request: Request, sb: Client
+    path: str,
+    request: Request,
+    sb: Client,
+    api_key_id: str | None = None,
 ) -> Response | StreamingResponse:
+    t0 = time.perf_counter()
     try:
         body: dict[str, Any] = await request.json()
     except Exception as e:
+        _log_request(
+            sb, api_key_id=api_key_id, instance_id=None, model_slug=None,
+            path=path, streaming=False, status_code=400,
+            latency_ms=int((time.perf_counter() - t0) * 1000),
+            error=f"invalid JSON: {e}",
+        )
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid JSON: {e}")
 
     model = body.get("model")
     if not model:
+        _log_request(
+            sb, api_key_id=api_key_id, instance_id=None, model_slug=None,
+            path=path, streaming=False, status_code=400,
+            latency_ms=int((time.perf_counter() - t0) * 1000),
+            error="missing model field",
+        )
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Missing 'model' field")
 
     picked = pick_instance(model, sb)
@@ -121,6 +172,14 @@ async def _proxy(
         upstream_headers["Authorization"] = f"Bearer {vllm_key}"
 
     if is_stream:
+        # Log stream start (status 200, no token counts — would need to parse
+        # SSE final chunk; punt on that for M5 iteration).
+        _log_request(
+            sb, api_key_id=api_key_id, instance_id=instance["id"],
+            model_slug=model_row["slug"], path=path, streaming=True,
+            status_code=200,
+            latency_ms=int((time.perf_counter() - t0) * 1000),
+        )
         return StreamingResponse(
             _stream_from_upstream(url, body, upstream_headers),
             media_type="text/event-stream",
@@ -135,9 +194,30 @@ async def _proxy(
             r = await client.post(url, json=body, headers=upstream_headers)
         except httpx.HTTPError as e:
             logger.warning("Upstream %s failed: %s", url, e)
+            _log_request(
+                sb, api_key_id=api_key_id, instance_id=instance["id"],
+                model_slug=model_row["slug"], path=path, streaming=False,
+                status_code=502,
+                latency_ms=int((time.perf_counter() - t0) * 1000),
+                error=str(e),
+            )
             raise HTTPException(
                 status.HTTP_502_BAD_GATEWAY, f"Upstream unreachable: {e}"
             ) from e
+
+    usage: dict[str, Any] | None = None
+    try:
+        usage = r.json().get("usage") if r.status_code < 400 else None
+    except Exception:  # noqa: BLE001
+        pass
+
+    _log_request(
+        sb, api_key_id=api_key_id, instance_id=instance["id"],
+        model_slug=model_row["slug"], path=path, streaming=False,
+        status_code=r.status_code,
+        latency_ms=int((time.perf_counter() - t0) * 1000),
+        usage=usage,
+    )
     return Response(
         content=r.content,
         status_code=r.status_code,
@@ -149,18 +229,18 @@ async def _proxy(
 async def chat_completions(
     request: Request,
     sb: Client = Depends(get_service_client),
-    _api_key_id: str = Depends(require_api_key),
+    api_key_id: str = Depends(require_api_key),
 ):
-    return await _proxy("/v1/chat/completions", request, sb)
+    return await _proxy("/v1/chat/completions", request, sb, api_key_id=api_key_id)
 
 
 @router.post("/v1/completions")
 async def completions(
     request: Request,
     sb: Client = Depends(get_service_client),
-    _api_key_id: str = Depends(require_api_key),
+    api_key_id: str = Depends(require_api_key),
 ):
-    return await _proxy("/v1/completions", request, sb)
+    return await _proxy("/v1/completions", request, sb, api_key_id=api_key_id)
 
 
 @router.get("/v1/models")

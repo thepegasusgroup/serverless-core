@@ -283,6 +283,23 @@ async def pause(
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
 
 
+@router.get("/request-logs")
+def list_request_logs(
+    limit: int = Query(default=100, ge=1, le=500),
+    api_key_id: str | None = Query(default=None),
+    sb: Client = Depends(get_service_client),
+) -> list[dict]:
+    q = (
+        sb.table("request_logs")
+        .select("*")
+        .order("created_at", desc=True)
+        .limit(limit)
+    )
+    if api_key_id:
+        q = q.eq("api_key_id", api_key_id)
+    return q.execute().data or []
+
+
 @router.post("/instances/{instance_id}/resume")
 async def resume(
     instance_id: str,

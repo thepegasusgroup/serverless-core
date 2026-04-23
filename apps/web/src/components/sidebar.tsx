@@ -34,8 +34,8 @@ const groups: {
     label: "Config",
     items: [
       { href: "/keys", label: "API keys", icon: Key },
+      { href: "/logs", label: "Logs", icon: ScrollText },
       { href: "/models", label: "Models", icon: Database, disabled: true },
-      { href: "/logs", label: "Logs", icon: ScrollText, disabled: true },
     ],
   },
 ];
