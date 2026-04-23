@@ -3,8 +3,10 @@
 FROM node:22-alpine AS deps
 WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@10.33.2 --activate
-COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile --prod=false
+COPY package.json ./
+# Workspace lockfile lives at repo root; install without it to keep the
+# Docker build context contained to apps/web.
+RUN pnpm install --prod=false --no-frozen-lockfile
 
 FROM node:22-alpine AS builder
 WORKDIR /app
