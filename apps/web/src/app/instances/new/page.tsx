@@ -25,6 +25,7 @@ export default function NewInstancePage() {
   const [maxDph, setMaxDph] = useState(0.3);
   const [minCpu, setMinCpu] = useState(12);
   const [minBandwidth, setMinBandwidth] = useState(500);
+  const [datacenterOnly, setDatacenterOnly] = useState(true);
   const [modelSlug, setModelSlug] = useState("qwen2.5-7b-instruct");
 
   const [offers, setOffers] = useState<Offer[]>([]);
@@ -40,6 +41,7 @@ export default function NewInstancePage() {
         max_dph: String(maxDph),
         min_cpu_cores: String(minCpu),
         min_bandwidth: String(minBandwidth),
+        datacenter_only: String(datacenterOnly),
         limit: "20",
       });
       const data = await api<Offer[]>(`/admin/offers?${params}`);
@@ -103,6 +105,20 @@ export default function NewInstancePage() {
               onChange={(v) => setMinBandwidth(parseInt(v) || 0)}
             />
             <Field label="Model" value={modelSlug} onChange={setModelSlug} />
+          </div>
+          <div className="flex items-center gap-4 mb-4">
+            <label className="flex items-center gap-2 text-sm text-zinc-300 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={datacenterOnly}
+                onChange={(e) => setDatacenterOnly(e.target.checked)}
+                className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 accent-zinc-200"
+              />
+              Datacenter hosts only
+              <span className="text-[11px] text-zinc-500">
+                (pricier but reliable)
+              </span>
+            </label>
           </div>
           <button
             onClick={search}

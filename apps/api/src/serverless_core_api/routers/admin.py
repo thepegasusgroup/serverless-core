@@ -51,6 +51,9 @@ async def list_offers(
     min_bandwidth: int | None = Query(
         default=None, description="Min download bandwidth in Mbps"
     ),
+    datacenter_only: bool = Query(
+        default=False, description="Restrict to professional datacenter hosts"
+    ),
     region: str | None = Query(default=None, description="'eu' | 'us' | 'na' | none"),
     include_blocked: str | None = Query(
         default=None,
@@ -68,6 +71,7 @@ async def list_offers(
         min_cpu_cores=min_cpu_cores,
         min_cpu_ghz=min_cpu_ghz,
         min_inet_down_mbps=min_bandwidth,
+        datacenter_only=datacenter_only,
     )
     try:
         raw = await vast.search_offers(query)

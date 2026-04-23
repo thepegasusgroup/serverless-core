@@ -18,6 +18,7 @@ def build_offer_query(
     min_cpu_cores: int | None = None,
     min_cpu_ghz: float | None = None,
     min_inet_down_mbps: int | None = None,
+    datacenter_only: bool = False,
 ) -> dict[str, Any]:
     # `limit` + `order` go INSIDE the q dict — they're part of vast's query DSL.
     # Default server-side page cap is ~64; bumping it returns the full slice
@@ -45,6 +46,9 @@ def build_offer_query(
         q["cpu_ghz"] = {"gte": min_cpu_ghz}
     if min_inet_down_mbps is not None:
         q["inet_down"] = {"gte": min_inet_down_mbps}
+    if datacenter_only:
+        # Restrict to hosts marked as datacenter (not consumer/home rigs).
+        q["datacenter"] = {"eq": True}
     return q
 
 

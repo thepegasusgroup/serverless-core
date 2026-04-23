@@ -27,6 +27,10 @@ def search(
     min_bandwidth: Optional[int] = typer.Option(
         None, "--min-bandwidth", help="Minimum download bandwidth (Mbps)"
     ),
+    datacenter_only: bool = typer.Option(
+        False, "--datacenter-only/--no-datacenter-only",
+        help="Restrict to professional datacenter hosts",
+    ),
     region: Optional[str] = typer.Option(
         None, "--region", help="'eu' | 'us' | 'na'"
     ),
@@ -61,6 +65,8 @@ def search(
         params["min_cpu_ghz"] = min_ghz
     if min_bandwidth is not None:
         params["min_bandwidth"] = min_bandwidth
+    if datacenter_only:
+        params["datacenter_only"] = "true"
     if region:
         params["region"] = region
     if include_blocked:
