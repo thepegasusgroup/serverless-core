@@ -45,7 +45,12 @@ async def rent_instance(
 
     instance_id = str(uuid4())
     vllm_args = _build_vllm_args(model["hf_repo"], model.get("vllm_args") or {})
+    # vast.ai packs docker-run flags into the env dict — port mappings are
+    # represented as keys like "-p 8000:8000". Without this, vLLM's HTTP
+    # server on :8000 isn't reachable from outside the rented box, which
+    # breaks the proxy in M2.5.
     env = {
+        "-p 8000:8000": "1",
         "SC_CONTROL_URL": settings.public_api_url,
         "SC_AGENT_SECRET": settings.agent_shared_secret,
         "SC_INSTANCE_ID": instance_id,
