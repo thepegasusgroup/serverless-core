@@ -180,6 +180,79 @@ def get_instance(
 
 
 # -----------------------------------------------------------------------------
+# Models catalogue
+# -----------------------------------------------------------------------------
+
+
+class ModelIn(BaseModel):
+    slug: str
+    hf_repo: str
+    vllm_args: dict = {}
+    min_vram_gb: int = 16
+    docker_image: str
+    enabled: bool = True
+    auto_pause_minutes: int | None = 10
+
+
+class ModelPatch(BaseModel):
+    slug: str | None = None
+    hf_repo: str | None = None
+    vllm_args: dict | None = None
+    min_vram_gb: int | None = None
+    docker_image: str | None = None
+    enabled: bool | None = None
+    auto_pause_minutes: int | None = None
+
+
+@router.get("/models")
+def list_models(sb: Client = Depends(get_service_client)) -> list[dict]:
+    return (
+        sb.table("models")
+        .select("*")
+        .order("created_at", desc=True)
+        .execute()
+        .data
+        or []
+    )
+
+
+@router.post("/models", status_code=status.HTTP_201_CREATED)
+def create_model(
+    body: ModelIn, sb: Client = Depends(get_service_client)
+) -> dict:
+    try:
+        res = sb.table("models").insert(body.model_dump()).execute()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    if not res.data:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Insert returned nothing")
+    return res.data[0]
+
+
+@router.patch("/models/{model_id}")
+def update_model(
+    model_id: str,
+    body: ModelPatch,
+    sb: Client = Depends(get_service_client),
+) -> dict:
+    patch = {k: v for k, v in body.model_dump(exclude_unset=True).items()}
+    if not patch:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No fields to update")
+    res = sb.table("models").update(patch).eq("id", model_id).execute()
+    if not res.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Model not found")
+    return res.data[0]
+
+
+@router.delete("/models/{model_id}")
+def delete_model(
+    model_id: str, sb: Client = Depends(get_service_client)
+) -> dict:
+    sb.table("models").delete().eq("id", model_id).execute()
+    return {"ok": True}
+
+
+# -----------------------------------------------------------------------------
 # API keys
 # -----------------------------------------------------------------------------
 
