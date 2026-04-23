@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from supabase import Client
 
 from serverless_core_api.deps import (
+    ApiPrincipal,
     get_service_client,
     get_staff_user,
     require_api_key,
@@ -93,12 +94,15 @@ async def _proxy(
     request: Request,
     sb: Client,
     api_key_id: str | None = None,
+    principal: "ApiPrincipal | None" = None,
 ) -> Response | StreamingResponse:
     try:
         body: dict[str, Any] = await request.json()
     except Exception as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid JSON: {e}")
-    return await _proxy_with_body(path, body, request, sb, api_key_id=api_key_id)
+    return await _proxy_with_body(
+        path, body, request, sb, api_key_id=api_key_id, principal=principal
+    )
 
 
 async def _proxy_with_body(
@@ -107,6 +111,7 @@ async def _proxy_with_body(
     request: Request,
     sb: Client,
     api_key_id: str | None = None,
+    principal: "ApiPrincipal | None" = None,
 ) -> Response | StreamingResponse:
     t0 = time.perf_counter()
 
@@ -119,6 +124,22 @@ async def _proxy_with_body(
             error="missing model field",
         )
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Missing 'model' field")
+
+    # Scope check: does this API key have access to this model?
+    # Accept either slug ("qwen2.5-7b-instruct") or HF repo ("Qwen/...").
+    if principal is not None:
+        slug_form = model.lower().split("/")[-1] if "/" in model else model.lower()
+        if not principal.can_use_model(slug_form):
+            _log_request(
+                sb, api_key_id=api_key_id, instance_id=None, model_slug=slug_form,
+                path=path, streaming=False, status_code=403,
+                latency_ms=int((time.perf_counter() - t0) * 1000),
+                error="model not in allowed_models",
+            )
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                f"API key not authorized for model '{model}'",
+            )
 
     picked = pick_instance(model, sb)
 
@@ -237,9 +258,12 @@ async def _proxy_with_body(
 async def chat_completions(
     request: Request,
     sb: Client = Depends(get_service_client),
-    api_key_id: str = Depends(require_api_key),
+    principal: ApiPrincipal = Depends(require_api_key),
 ):
-    return await _proxy("/v1/chat/completions", request, sb, api_key_id=api_key_id)
+    return await _proxy(
+        "/v1/chat/completions", request, sb,
+        api_key_id=principal.id, principal=principal,
+    )
 
 
 @router.post("/v1/pipelines/{slug}/chat")
@@ -247,8 +271,13 @@ async def pipeline_chat(
     slug: str,
     request: Request,
     sb: Client = Depends(get_service_client),
-    api_key_id: str = Depends(require_api_key),
+    principal: ApiPrincipal = Depends(require_api_key),
 ):
+    if not principal.can_use_pipeline(slug):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            f"API key not authorized for pipeline '{slug}'",
+        )
     """Run a preset pipeline — model + system prompt baked in.
 
     Clients send normal chat body (messages/stream/etc.); we inject the
@@ -286,12 +315,9 @@ async def pipeline_chat(
             ]
         body["messages"] = messages
 
-    # Rewrap request.json() result — FastAPI already consumed the body, so
-    # we monkey-patch by passing via a wrapper Request that yields body on
-    # demand. Simplest: build a synthetic Request via httpx path — but that
-    # adds complexity. Instead, call the core logic directly with the body.
     return await _proxy_with_body(
-        "/v1/chat/completions", body, request, sb, api_key_id=api_key_id
+        "/v1/chat/completions", body, request, sb,
+        api_key_id=principal.id, principal=principal,
     )
 
 
@@ -299,9 +325,12 @@ async def pipeline_chat(
 async def completions(
     request: Request,
     sb: Client = Depends(get_service_client),
-    api_key_id: str = Depends(require_api_key),
+    principal: ApiPrincipal = Depends(require_api_key),
 ):
-    return await _proxy("/v1/completions", request, sb, api_key_id=api_key_id)
+    return await _proxy(
+        "/v1/completions", request, sb,
+        api_key_id=principal.id, principal=principal,
+    )
 
 
 # Staff-only alias for the dashboard playground — authenticates via Supabase
@@ -318,7 +347,7 @@ async def playground_chat(
 @router.get("/v1/models")
 def list_models(
     sb: Client = Depends(get_service_client),
-    _api_key_id: str = Depends(require_api_key),
+    principal: ApiPrincipal = Depends(require_api_key),
 ):
     rows = (
         sb.table("models")
@@ -328,6 +357,7 @@ def list_models(
         .data
         or []
     )
+    visible = [r for r in rows if principal.can_use_model(r["slug"])]
     return JSONResponse(
         {
             "object": "list",
@@ -338,7 +368,7 @@ def list_models(
                     "owned_by": "serverless-core",
                     "hf_repo": r["hf_repo"],
                 }
-                for r in rows
+                for r in visible
             ],
         }
     )

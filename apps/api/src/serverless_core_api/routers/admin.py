@@ -322,10 +322,14 @@ def delete_pipeline(pid: str, sb: Client = Depends(get_service_client)) -> dict:
 class CreateKeyRequest(BaseModel):
     label: str
     requests_per_minute: int | None = None
+    allowed_models: list[str] | None = None  # None = all; [] = none
+    allowed_pipelines: list[str] | None = None
 
 
 class PatchKeyRequest(BaseModel):
     requests_per_minute: int | None = None
+    allowed_models: list[str] | None = None
+    allowed_pipelines: list[str] | None = None
 
 
 @router.post("/api-keys", status_code=status.HTTP_201_CREATED)
@@ -345,6 +349,8 @@ def create_api_key(
                 "prefix": prefix,
                 "label": body.label,
                 "requests_per_minute": body.requests_per_minute,
+                "allowed_models": body.allowed_models,
+                "allowed_pipelines": body.allowed_pipelines,
             }
         )
         .execute()
@@ -356,6 +362,8 @@ def create_api_key(
         "prefix": prefix,
         "key": token,  # plaintext — shown ONCE, never returned again
         "requests_per_minute": row["requests_per_minute"],
+        "allowed_models": row["allowed_models"],
+        "allowed_pipelines": row["allowed_pipelines"],
         "created_at": row["created_at"],
     }
 

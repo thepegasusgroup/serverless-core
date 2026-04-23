@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import time
+from dataclasses import dataclass
 from functools import lru_cache
 
 import jwt as pyjwt
@@ -11,6 +12,21 @@ from supabase import Client, create_client
 from serverless_core_api.config import Settings, get_settings
 
 logger = logging.getLogger("serverless_core_api.deps")
+
+
+@dataclass
+class ApiPrincipal:
+    """The caller of a /v1/* endpoint — their api_keys row, distilled."""
+
+    id: str
+    allowed_models: list[str] | None  # None = all; [] = none
+    allowed_pipelines: list[str] | None
+
+    def can_use_model(self, slug: str) -> bool:
+        return self.allowed_models is None or slug in self.allowed_models
+
+    def can_use_pipeline(self, slug: str) -> bool:
+        return self.allowed_pipelines is None or slug in self.allowed_pipelines
 
 
 @lru_cache
@@ -84,11 +100,11 @@ def _check_rate_limit(key_id: str, per_min: int | None) -> None:
 def require_api_key(
     authorization: str | None = Header(default=None),
     sb: Client = Depends(get_service_client),
-) -> str:
+) -> ApiPrincipal:
     """Require a valid `Authorization: Bearer sc_live_...` header.
 
-    Also enforces the per-key `requests_per_minute` limit. Returns the
-    api_keys.id so callers can log usage.
+    Enforces rate limit. Returns a principal with scopes so callers can
+    check `principal.can_use_model(slug)` / `.can_use_pipeline(slug)`.
     """
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing API key")
@@ -99,7 +115,9 @@ def require_api_key(
     key_hash = hashlib.sha256(token.encode()).hexdigest()
     res = (
         sb.table("api_keys")
-        .select("id,revoked_at,requests_per_minute")
+        .select(
+            "id,revoked_at,requests_per_minute,allowed_models,allowed_pipelines"
+        )
         .eq("key_hash", key_hash)
         .limit(1)
         .execute()
@@ -117,7 +135,11 @@ def require_api_key(
     except Exception:  # noqa: BLE001
         pass
 
-    return row["id"]
+    return ApiPrincipal(
+        id=row["id"],
+        allowed_models=row.get("allowed_models"),
+        allowed_pipelines=row.get("allowed_pipelines"),
+    )
 
 
 def _decode_supabase_jwt(token: str, settings: Settings) -> dict:
