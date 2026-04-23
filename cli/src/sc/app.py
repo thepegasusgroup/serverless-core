@@ -1,6 +1,7 @@
 import typer
 from rich.console import Console
 
+from sc.commands import instance as instance_commands
 from sc.commands import offers as offers_commands
 from sc.config import Config
 
@@ -10,6 +11,13 @@ console = Console()
 offers_app = typer.Typer(help="Browse vast.ai offers through your control plane.")
 offers_app.command("search")(offers_commands.search)
 app.add_typer(offers_app, name="offers")
+
+instance_app = typer.Typer(help="Rent and manage vast.ai instances.")
+instance_app.command("rent")(instance_commands.rent)
+instance_app.command("list")(instance_commands.list_cmd)
+instance_app.command("destroy")(instance_commands.destroy)
+instance_app.command("show")(instance_commands.show)
+app.add_typer(instance_app, name="instance")
 
 
 @app.command()

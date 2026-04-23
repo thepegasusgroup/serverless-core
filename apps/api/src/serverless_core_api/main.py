@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from serverless_core_api.config import get_settings
-from serverless_core_api.routers import admin, health
+from serverless_core_api.routers import admin, health, internal
 from serverless_core_api.vast import VastClient
 
 logger = logging.getLogger("serverless_core_api")
@@ -42,6 +42,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(health.router)
     app.include_router(admin.router)
+    app.include_router(internal.router)
     return app
 
 

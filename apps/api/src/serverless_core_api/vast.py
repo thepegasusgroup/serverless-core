@@ -60,3 +60,37 @@ class VastClient:
         if isinstance(data, dict):
             return data.get("offers", [])
         return []
+
+    async def create_instance(
+        self,
+        *,
+        offer_id: int,
+        image: str,
+        env: dict[str, str],
+        disk_gb: int,
+        label: str,
+        onstart: str = "",
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "client_id": "me",
+            "image": image,
+            "env": env,
+            "disk": disk_gb,
+            "label": label,
+            "runtype": "args",
+        }
+        if onstart:
+            payload["onstart"] = onstart
+        r = await self._client.put(f"/asks/{offer_id}/", json=payload)
+        r.raise_for_status()
+        return r.json()
+
+    async def destroy_instance(self, contract_id: int) -> dict[str, Any]:
+        r = await self._client.delete(f"/instances/{contract_id}/")
+        r.raise_for_status()
+        return r.json() if r.content else {}
+
+    async def show_instance(self, contract_id: int) -> dict[str, Any]:
+        r = await self._client.get(f"/instances/{contract_id}/")
+        r.raise_for_status()
+        return r.json()

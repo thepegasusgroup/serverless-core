@@ -1,0 +1,18 @@
+[project]
+name = "serverless-core-agent"
+version = "0.1.0"
+description = "serverless-core on-instance agent (runs alongside vLLM)"
+requires-python = ">=3.10"
+dependencies = [
+  "httpx>=0.28",
+]
+
+[project.scripts]
+sc-agent = "agent.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent"]

@@ -15,5 +15,4 @@ supabase/.temp/
 apps/web/.next/
 apps/web/node_modules/
 dev-scripts/
-docker/vllm-agent/
 README.md
