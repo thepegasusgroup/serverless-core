@@ -1,25 +1,30 @@
-# Built at repo root: docker build -f apps/api/Dockerfile -t sc-api .
-FROM python:3.12-slim AS base
+# Built from the repo root: fly runs `docker build -f apps/api/Dockerfile .`
+FROM python:3.12-slim
+
+# Pull uv from its official image (faster and cacheable).
+COPY --from=ghcr.io/astral-sh/uv:0.11.7 /uv /uvx /bin/
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-
-RUN pip install --no-cache-dir uv==0.5.*
 
 WORKDIR /app
 
-# Workspace metadata first (cache-friendly).
-COPY pyproject.toml uv.lock README.md /app/
-COPY apps/api/pyproject.toml /app/apps/api/pyproject.toml
-COPY cli/pyproject.toml /app/cli/pyproject.toml
+# Workspace metadata first — lets Docker cache deps independently of source.
+COPY pyproject.toml uv.lock ./
+COPY apps/api/pyproject.toml ./apps/api/pyproject.toml
+COPY cli/pyproject.toml ./cli/pyproject.toml
+# uv workspace resolution touches every member; ship a stub src tree for cli.
+COPY cli/src ./cli/src
 
-# Install deps only.
-RUN uv sync --package serverless-core-api --frozen --no-install-project --no-dev
+# Install dependencies only (no project code yet).
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --package serverless-core-api --frozen --no-install-project --no-dev
 
-# Now copy source and install the project itself.
-COPY apps/api /app/apps/api
-RUN uv sync --package serverless-core-api --frozen --no-dev
+# Now bring in the actual API source and install the project itself.
+COPY apps/api ./apps/api
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --package serverless-core-api --frozen --no-dev
 
 ENV PATH="/app/.venv/bin:${PATH}"
 ENV PYTHONUNBUFFERED=1
