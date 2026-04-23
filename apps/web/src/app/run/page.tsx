@@ -8,6 +8,7 @@ import { AppShell } from "@/components/app-shell";
 import { api } from "@/lib/api";
 
 type Model = { id: string; slug: string; hf_repo: string };
+type Pipeline = { id: string; slug: string; label: string; output_mode: string };
 
 const SYSTEM_STORAGE = "sc_run_system";
 const USER_STORAGE = "sc_run_user";
@@ -15,9 +16,14 @@ const USER_STORAGE = "sc_run_user";
 const DEFAULT_SYSTEM = "You are a helpful assistant. Answer concisely.";
 const DEFAULT_USER = "Write a short haiku about serverless GPUs.";
 
+type TargetMode = "model" | "pipeline";
+
 export default function RunPage() {
+  const [targetMode, setTargetMode] = useState<TargetMode>("model");
   const [models, setModels] = useState<Model[]>([]);
+  const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [modelSlug, setModelSlug] = useState("");
+  const [pipelineSlug, setPipelineSlug] = useState("");
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM);
   const [userPrompt, setUserPrompt] = useState(DEFAULT_USER);
   const [streaming, setStreaming] = useState(true);
@@ -94,6 +100,16 @@ export default function RunPage() {
           if (data.length && !modelSlug) setModelSlug(data[0].slug);
         }
       });
+    supabase
+      .from("pipelines")
+      .select("id,slug,label,output_mode")
+      .eq("enabled", true)
+      .then(({ data }) => {
+        if (data) {
+          setPipelines(data as Pipeline[]);
+          if (data.length && !pipelineSlug) setPipelineSlug(data[0].slug);
+        }
+      });
     const storedSys = localStorage.getItem(SYSTEM_STORAGE);
     if (storedSys) setSystemPrompt(storedSys);
     const storedUser = localStorage.getItem(USER_STORAGE);
@@ -123,32 +139,48 @@ export default function RunPage() {
     runStartRef.current = t0;
     let ttfbMs: number | undefined;
     let tokenCount = 0;
-    logEvt("info", `Run started · model=${modelSlug} · stream=${streaming}`);
+    logEvt(
+      "info",
+      targetMode === "model"
+        ? `Run started · model=${modelSlug} · stream=${streaming}`
+        : `Run started · pipeline=${pipelineSlug}`,
+    );
 
-    const messages = systemPrompt.trim()
-      ? [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ]
-      : [{ role: "user", content: userPrompt }];
-
-    const body = {
-      model: modelSlug,
-      messages,
-      stream: streaming,
-      temperature,
-      max_tokens: maxTokens,
-    };
+    // Body shape differs by target mode:
+    //   Model: we own system + stream + temp/max_tokens
+    //   Pipeline: pipeline config decides those; client sends just messages
+    const body: Record<string, unknown> =
+      targetMode === "model"
+        ? {
+            model: modelSlug,
+            messages: systemPrompt.trim()
+              ? [
+                  { role: "system", content: systemPrompt },
+                  { role: "user", content: userPrompt },
+                ]
+              : [{ role: "user", content: userPrompt }],
+            stream: streaming,
+            temperature,
+            max_tokens: maxTokens,
+          }
+        : {
+            messages: [{ role: "user", content: userPrompt }],
+            stream: streaming,
+          };
 
     const supabase = createClient();
     const {
       data: { session },
     } = await supabase.auth.getSession();
     const apiUrl = process.env.NEXT_PUBLIC_API_URL || "";
+    const endpoint =
+      targetMode === "model"
+        ? `${apiUrl}/admin/playground/chat`
+        : `${apiUrl}/admin/playground/pipeline/${pipelineSlug}`;
 
     try {
-      logEvt("net", `POST ${apiUrl}/admin/playground/chat`);
-      const res = await fetch(`${apiUrl}/admin/playground/chat`, {
+      logEvt("net", `POST ${endpoint}`);
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -228,7 +260,17 @@ export default function RunPage() {
       abortRef.current = null;
       runStartRef.current = 0;
     }
-  }, [userPrompt, systemPrompt, modelSlug, streaming, temperature, maxTokens]);
+  }, [
+    userPrompt,
+    systemPrompt,
+    modelSlug,
+    pipelineSlug,
+    targetMode,
+    streaming,
+    temperature,
+    maxTokens,
+    logEvt,
+  ]);
 
   const stop = () => abortRef.current?.abort();
 
@@ -240,54 +282,103 @@ export default function RunPage() {
           <div>
             <h1 className="text-2xl font-semibold">Run</h1>
             <p className="text-xs text-zinc-500 mt-0.5">
-              Staff test console · auth via your Supabase session · calls hit{" "}
-              <code className="text-zinc-300">/admin/playground/chat</code>
+              Staff test console · auth via your Supabase session · target a
+              raw model or a pipeline
             </p>
           </div>
-          <div className="flex items-end gap-3">
-            <LabeledInline label="model">
-              <select
-                value={modelSlug}
-                onChange={(e) => setModelSlug(e.target.value)}
-                className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm focus:border-zinc-500 focus:outline-none min-w-[180px]"
-              >
-                {models.map((m) => (
-                  <option key={m.id} value={m.slug}>
-                    {m.slug}
-                  </option>
-                ))}
-              </select>
+          <div className="flex items-end gap-3 flex-wrap">
+            {/* Mode toggle */}
+            <LabeledInline label="target">
+              <div className="inline-flex rounded border border-zinc-700 bg-zinc-900 overflow-hidden text-sm">
+                <button
+                  type="button"
+                  onClick={() => setTargetMode("model")}
+                  className={`px-3 py-1.5 ${
+                    targetMode === "model"
+                      ? "bg-zinc-100 text-zinc-900"
+                      : "text-zinc-400 hover:text-zinc-100"
+                  }`}
+                >
+                  model
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTargetMode("pipeline")}
+                  className={`px-3 py-1.5 ${
+                    targetMode === "pipeline"
+                      ? "bg-zinc-100 text-zinc-900"
+                      : "text-zinc-400 hover:text-zinc-100"
+                  }`}
+                >
+                  pipeline
+                </button>
+              </div>
             </LabeledInline>
-            <LabeledInline label="temp">
-              <input
-                type="number"
-                step="0.1"
-                min="0"
-                max="2"
-                value={temperature}
-                onChange={(e) => setTemperature(parseFloat(e.target.value))}
-                className="w-20 rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
-              />
-            </LabeledInline>
-            <LabeledInline label="max tokens">
-              <input
-                type="number"
-                min="1"
-                max="8192"
-                value={maxTokens}
-                onChange={(e) => setMaxTokens(parseInt(e.target.value) || 512)}
-                className="w-24 rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
-              />
-            </LabeledInline>
-            <label className="flex items-center gap-2 text-sm text-zinc-300 cursor-pointer select-none px-2 py-1.5">
-              <input
-                type="checkbox"
-                checked={streaming}
-                onChange={(e) => setStreaming(e.target.checked)}
-                className="h-4 w-4 accent-zinc-200"
-              />
-              stream
-            </label>
+
+            {targetMode === "model" ? (
+              <>
+                <LabeledInline label="model">
+                  <select
+                    value={modelSlug}
+                    onChange={(e) => setModelSlug(e.target.value)}
+                    className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm focus:border-zinc-500 focus:outline-none min-w-[180px]"
+                  >
+                    {models.map((m) => (
+                      <option key={m.id} value={m.slug}>
+                        {m.slug}
+                      </option>
+                    ))}
+                  </select>
+                </LabeledInline>
+                <LabeledInline label="temp">
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    max="2"
+                    value={temperature}
+                    onChange={(e) => setTemperature(parseFloat(e.target.value))}
+                    className="w-20 rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
+                  />
+                </LabeledInline>
+                <LabeledInline label="max tokens">
+                  <input
+                    type="number"
+                    min="1"
+                    max="8192"
+                    value={maxTokens}
+                    onChange={(e) => setMaxTokens(parseInt(e.target.value) || 512)}
+                    className="w-24 rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
+                  />
+                </LabeledInline>
+                <label className="flex items-center gap-2 text-sm text-zinc-300 cursor-pointer select-none px-2 py-1.5">
+                  <input
+                    type="checkbox"
+                    checked={streaming}
+                    onChange={(e) => setStreaming(e.target.checked)}
+                    className="h-4 w-4 accent-zinc-200"
+                  />
+                  stream
+                </label>
+              </>
+            ) : (
+              <LabeledInline label="pipeline">
+                <select
+                  value={pipelineSlug}
+                  onChange={(e) => setPipelineSlug(e.target.value)}
+                  className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm focus:border-zinc-500 focus:outline-none min-w-[220px]"
+                >
+                  {pipelines.length === 0 && (
+                    <option value="">(no pipelines)</option>
+                  )}
+                  {pipelines.map((p) => (
+                    <option key={p.id} value={p.slug}>
+                      {p.slug} · {p.output_mode}
+                    </option>
+                  ))}
+                </select>
+              </LabeledInline>
+            )}
             {!running ? (
               <button
                 onClick={run}

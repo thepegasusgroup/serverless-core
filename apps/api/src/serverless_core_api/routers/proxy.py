@@ -292,19 +292,17 @@ async def _post_webhook(
         return r.status_code
 
 
-@router.post("/v1/pipelines/{slug}/chat")
-async def pipeline_chat(
+async def _run_pipeline(
     slug: str,
+    body: dict[str, Any],
     request: Request,
-    sb: Client = Depends(get_service_client),
-    principal: ApiPrincipal = Depends(require_api_key),
+    sb: Client,
+    principal: ApiPrincipal | None,
+    api_key_id: str | None,
 ):
-    if not principal.can_use_pipeline(slug):
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            f"API key not authorized for pipeline '{slug}'",
-        )
-
+    """Core pipeline logic — shared by the API-key-auth'd `/v1/pipelines/*`
+    and the staff-auth'd playground alias.
+    """
     res = (
         sb.table("pipelines")
         .select("*")
@@ -318,11 +316,6 @@ async def pipeline_chat(
             status.HTTP_404_NOT_FOUND, f"Pipeline '{slug}' not found or disabled"
         )
     pipe = res.data[0]
-
-    try:
-        body: dict[str, Any] = await request.json()
-    except Exception as e:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid JSON: {e}")
 
     # ---------------- INPUT stage ----------------
     messages = body.get("messages") or []
@@ -364,13 +357,13 @@ async def pipeline_chat(
     if output_mode == "return":
         return await _proxy_with_body(
             "/v1/chat/completions", body, request, sb,
-            api_key_id=principal.id, principal=principal,
+            api_key_id=api_key_id, principal=principal,
         )
 
     # Non-streaming output modes: get the full response first.
     response = await _proxy_with_body(
         "/v1/chat/completions", body, request, sb,
-        api_key_id=principal.id, principal=principal,
+        api_key_id=api_key_id, principal=principal,
     )
     # _proxy_with_body returns a starlette Response; pull JSON out.
     if not isinstance(response, Response):
@@ -435,8 +428,29 @@ async def completions(
     )
 
 
-# Staff-only alias for the dashboard playground — authenticates via Supabase
-# JWT instead of requiring an sc_live_ API key. Logs with api_key_id=null.
+@router.post("/v1/pipelines/{slug}/chat")
+async def pipeline_chat(
+    slug: str,
+    request: Request,
+    sb: Client = Depends(get_service_client),
+    principal: ApiPrincipal = Depends(require_api_key),
+):
+    if not principal.can_use_pipeline(slug):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            f"API key not authorized for pipeline '{slug}'",
+        )
+    try:
+        body: dict[str, Any] = await request.json()
+    except Exception as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid JSON: {e}")
+    return await _run_pipeline(
+        slug, body, request, sb, principal=principal, api_key_id=principal.id
+    )
+
+
+# Staff-only aliases for the dashboard playground — authenticate via Supabase
+# JWT instead of requiring an sc_live_ API key.
 @router.post("/admin/playground/chat")
 async def playground_chat(
     request: Request,
@@ -444,6 +458,22 @@ async def playground_chat(
     _user: dict = Depends(get_staff_user),
 ):
     return await _proxy("/v1/chat/completions", request, sb, api_key_id=None)
+
+
+@router.post("/admin/playground/pipeline/{slug}")
+async def playground_pipeline(
+    slug: str,
+    request: Request,
+    sb: Client = Depends(get_service_client),
+    _user: dict = Depends(get_staff_user),
+):
+    try:
+        body: dict[str, Any] = await request.json()
+    except Exception as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid JSON: {e}")
+    return await _run_pipeline(
+        slug, body, request, sb, principal=None, api_key_id=None
+    )
 
 
 @router.get("/v1/models")
