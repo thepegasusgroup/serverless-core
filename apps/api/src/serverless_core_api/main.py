@@ -1,11 +1,14 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from supabase import create_client
 
 from serverless_core_api.config import get_settings
 from serverless_core_api.routers import admin, health, internal
+from serverless_core_api.services.status_poller import poll_forever
 from serverless_core_api.vast import VastClient
 
 logger = logging.getLogger("serverless_core_api")
@@ -16,6 +19,9 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     app.state.settings = settings
     app.state.vast = VastClient(settings.vast_api_key)
+    app.state.sb_service = create_client(
+        settings.supabase_url, settings.supabase_service_role_key
+    )
 
     try:
         ok = await app.state.vast.ping()
@@ -23,9 +29,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("vast.ai ping errored at startup: %s", e)
 
+    poller_task = asyncio.create_task(
+        poll_forever(app.state.vast, app.state.sb_service)
+    )
+
     try:
         yield
     finally:
+        poller_task.cancel()
+        try:
+            await poller_task
+        except asyncio.CancelledError:
+            pass
         await app.state.vast.aclose()
 
 
