@@ -10,6 +10,7 @@ import {
   ScrollText,
   Settings,
   LogOut,
+  Key,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 
@@ -32,6 +33,7 @@ const groups: {
   {
     label: "Config",
     items: [
+      { href: "/keys", label: "API keys", icon: Key },
       { href: "/models", label: "Models", icon: Database, disabled: true },
       { href: "/logs", label: "Logs", icon: ScrollText, disabled: true },
     ],

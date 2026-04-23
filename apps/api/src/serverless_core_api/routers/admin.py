@@ -1,3 +1,7 @@
+import hashlib
+import secrets as _secrets
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
 from supabase import Client
@@ -168,6 +172,82 @@ def get_instance(
     if not res.data:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Instance not found")
     return res.data[0]
+
+
+# -----------------------------------------------------------------------------
+# API keys
+# -----------------------------------------------------------------------------
+
+
+class CreateKeyRequest(BaseModel):
+    label: str
+
+
+@router.post("/api-keys", status_code=status.HTTP_201_CREATED)
+def create_api_key(
+    body: CreateKeyRequest,
+    sb: Client = Depends(get_service_client),
+    user: dict = Depends(get_staff_user),
+) -> dict:
+    token = "sc_live_" + _secrets.token_urlsafe(32)
+    key_hash = hashlib.sha256(token.encode()).hexdigest()
+    prefix = token[:12]
+    row = (
+        sb.table("api_keys")
+        .insert(
+            {
+                "key_hash": key_hash,
+                "prefix": prefix,
+                "label": body.label,
+                # created_by left null unless we map email -> auth.users.id;
+                # not critical for M5.
+            }
+        )
+        .execute()
+        .data[0]
+    )
+    return {
+        "id": row["id"],
+        "label": row["label"],
+        "prefix": prefix,
+        "key": token,  # plaintext — shown ONCE, never returned again
+        "created_at": row["created_at"],
+    }
+
+
+@router.get("/api-keys")
+def list_api_keys(
+    sb: Client = Depends(get_service_client),
+) -> list[dict]:
+    rows = (
+        sb.table("api_keys")
+        .select("id,label,prefix,created_at,last_used_at,revoked_at")
+        .order("created_at", desc=True)
+        .execute()
+        .data
+        or []
+    )
+    return rows
+
+
+@router.delete("/api-keys/{key_id}")
+def revoke_api_key(
+    key_id: str, sb: Client = Depends(get_service_client)
+) -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    res = (
+        sb.table("api_keys")
+        .update({"revoked_at": now})
+        .eq("id", key_id)
+        .is_("revoked_at", "null")
+        .execute()
+    )
+    if not res.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Key not found or already revoked")
+    return {"ok": True}
+
+
+# -----------------------------------------------------------------------------
 
 
 @router.delete("/instances/{instance_id}")

@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from supabase import Client
 
-from serverless_core_api.deps import get_service_client
+from serverless_core_api.deps import get_service_client, require_api_key
 from serverless_core_api.services.routing import pick_instance
 
 logger = logging.getLogger("serverless_core_api.proxy")
@@ -97,18 +97,27 @@ async def _proxy(
 
 @router.post("/v1/chat/completions")
 async def chat_completions(
-    request: Request, sb: Client = Depends(get_service_client)
+    request: Request,
+    sb: Client = Depends(get_service_client),
+    _api_key_id: str = Depends(require_api_key),
 ):
     return await _proxy("/v1/chat/completions", request, sb)
 
 
 @router.post("/v1/completions")
-async def completions(request: Request, sb: Client = Depends(get_service_client)):
+async def completions(
+    request: Request,
+    sb: Client = Depends(get_service_client),
+    _api_key_id: str = Depends(require_api_key),
+):
     return await _proxy("/v1/completions", request, sb)
 
 
 @router.get("/v1/models")
-def list_models(sb: Client = Depends(get_service_client)):
+def list_models(
+    sb: Client = Depends(get_service_client),
+    _api_key_id: str = Depends(require_api_key),
+):
     rows = (
         sb.table("models")
         .select("slug,hf_repo,created_at")

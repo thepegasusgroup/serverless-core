@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import time
 from functools import lru_cache
@@ -54,6 +55,47 @@ def verify_agent_secret(
 ) -> None:
     if not x_agent_secret or x_agent_secret != settings.agent_shared_secret:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid agent secret")
+
+
+API_KEY_PREFIX = "sc_live_"
+
+
+def require_api_key(
+    authorization: str | None = Header(default=None),
+    sb: Client = Depends(get_service_client),
+) -> str:
+    """Require a valid `Authorization: Bearer sc_live_...` header.
+
+    Returns the api_keys.id so callers can log usage. Updates last_used_at
+    best-effort.
+    """
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing API key")
+    token = authorization.split(" ", 1)[1].strip()
+    if not token.startswith(API_KEY_PREFIX):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid API key format")
+
+    key_hash = hashlib.sha256(token.encode()).hexdigest()
+    res = (
+        sb.table("api_keys")
+        .select("id,revoked_at")
+        .eq("key_hash", key_hash)
+        .limit(1)
+        .execute()
+    )
+    if not res.data:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unknown API key")
+    row = res.data[0]
+    if row.get("revoked_at"):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "API key revoked")
+
+    # Best-effort last_used_at update.
+    try:
+        sb.table("api_keys").update({"last_used_at": "now()"}).eq("id", row["id"]).execute()
+    except Exception:  # noqa: BLE001
+        pass
+
+    return row["id"]
 
 
 def _decode_supabase_jwt(token: str, settings: Settings) -> dict:
