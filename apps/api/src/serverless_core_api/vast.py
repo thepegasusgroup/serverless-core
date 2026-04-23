@@ -13,15 +13,16 @@ def build_offer_query(
     min_vram_gb: int | None = None,
     num_gpus: int = 1,
     min_reliability: float = 0.95,
-    verified: bool = True,
+    verified: bool | None = None,
     rentable: bool = True,
 ) -> dict[str, Any]:
     q: dict[str, Any] = {
         "num_gpus": {"eq": num_gpus},
         "reliability2": {"gte": min_reliability},
-        "verified": {"eq": verified},
         "rentable": {"eq": rentable},
     }
+    if verified is not None:
+        q["verified"] = {"eq": verified}
     if gpu:
         # vast.ai stores GPU names with spaces (e.g. "RTX 5090"); underscores
         # are more shell-friendly so we accept either form.
