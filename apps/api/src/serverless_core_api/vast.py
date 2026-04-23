@@ -15,6 +15,9 @@ def build_offer_query(
     min_reliability: float = 0.95,
     verified: bool | None = None,
     rentable: bool = True,
+    min_cpu_cores: int | None = None,
+    min_cpu_ghz: float | None = None,
+    min_inet_down_mbps: int | None = None,
 ) -> dict[str, Any]:
     # `limit` + `order` go INSIDE the q dict — they're part of vast's query DSL.
     # Default server-side page cap is ~64; bumping it returns the full slice
@@ -36,6 +39,12 @@ def build_offer_query(
         q["dph_total"] = {"lt": max_dph}
     if min_vram_gb is not None:
         q["gpu_ram"] = {"gte": min_vram_gb * 1000}
+    if min_cpu_cores is not None:
+        q["cpu_cores_effective"] = {"gte": min_cpu_cores}
+    if min_cpu_ghz is not None:
+        q["cpu_ghz"] = {"gte": min_cpu_ghz}
+    if min_inet_down_mbps is not None:
+        q["inet_down"] = {"gte": min_inet_down_mbps}
     return q
 
 

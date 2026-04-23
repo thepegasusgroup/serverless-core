@@ -46,6 +46,11 @@ async def list_offers(
     min_vram: int | None = Query(default=None, description="Min VRAM per GPU in GB"),
     num_gpus: int = Query(default=1, ge=1, le=8),
     min_reliability: float = Query(default=0.95, ge=0.0, le=1.0),
+    min_cpu_cores: int | None = Query(default=None, description="Min effective CPU cores"),
+    min_cpu_ghz: float | None = Query(default=None, description="Min CPU clock in GHz"),
+    min_bandwidth: int | None = Query(
+        default=None, description="Min download bandwidth in Mbps"
+    ),
     region: str | None = Query(default=None, description="'eu' | 'us' | 'na' | none"),
     include_blocked: str | None = Query(
         default=None,
@@ -60,6 +65,9 @@ async def list_offers(
         min_vram_gb=min_vram,
         num_gpus=num_gpus,
         min_reliability=min_reliability,
+        min_cpu_cores=min_cpu_cores,
+        min_cpu_ghz=min_cpu_ghz,
+        min_inet_down_mbps=min_bandwidth,
     )
     try:
         raw = await vast.search_offers(query)
