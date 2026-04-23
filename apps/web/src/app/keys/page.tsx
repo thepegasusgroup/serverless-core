@@ -10,6 +10,7 @@ type ApiKey = {
   id: string;
   label: string;
   prefix: string;
+  requests_per_minute: number | null;
   created_at: string;
   last_used_at: string | null;
   revoked_at: string | null;
@@ -27,6 +28,7 @@ export default function ApiKeysPage() {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [newLabel, setNewLabel] = useState("");
+  const [newRpm, setNewRpm] = useState("");
   const [creating, setCreating] = useState(false);
   const [revealedKey, setRevealedKey] = useState<CreateResp | null>(null);
   const [copied, setCopied] = useState(false);
@@ -49,20 +51,42 @@ export default function ApiKeysPage() {
   const create = async () => {
     const label = newLabel.trim();
     if (!label) return;
+    const rpm = newRpm.trim() ? parseInt(newRpm) : null;
     setCreating(true);
     try {
       const resp = await api<CreateResp>("/admin/api-keys", {
         method: "POST",
-        body: JSON.stringify({ label }),
+        body: JSON.stringify({ label, requests_per_minute: rpm }),
       });
       setRevealedKey(resp);
       setNewLabel("");
+      setNewRpm("");
       toast.success("Key created. Copy it now — it won't be shown again.");
       await fetchAll();
     } catch (e) {
       toast.error(`Create failed: ${(e as Error).message}`);
     } finally {
       setCreating(false);
+    }
+  };
+
+  const updateLimit = async (k: ApiKey) => {
+    const cur = k.requests_per_minute ?? "";
+    const val = prompt(
+      `Requests/minute for "${k.label}" (empty = unlimited):`,
+      String(cur),
+    );
+    if (val === null) return;
+    const rpm = val.trim() === "" ? null : parseInt(val);
+    try {
+      await api(`/admin/api-keys/${k.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ requests_per_minute: rpm }),
+      });
+      toast.success("Updated");
+      fetchAll();
+    } catch (e) {
+      toast.error(`Update failed: ${(e as Error).message}`);
     }
   };
 
@@ -136,6 +160,17 @@ export default function ApiKeysPage() {
                 onKeyDown={(e) => e.key === "Enter" && create()}
               />
             </label>
+            <label className="w-40">
+              <span className="text-xs uppercase tracking-wider text-zinc-500">
+                Req/min limit
+              </span>
+              <input
+                value={newRpm}
+                onChange={(e) => setNewRpm(e.target.value)}
+                placeholder="unlimited"
+                className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm focus:border-zinc-500 focus:outline-none"
+              />
+            </label>
             <button
               onClick={create}
               disabled={creating || !newLabel.trim()}
@@ -153,6 +188,7 @@ export default function ApiKeysPage() {
               <tr>
                 <th className="px-4 py-3 text-left font-medium">label</th>
                 <th className="px-4 py-3 text-left font-medium">prefix</th>
+                <th className="px-4 py-3 text-right font-medium">req/min</th>
                 <th className="px-4 py-3 text-left font-medium">created</th>
                 <th className="px-4 py-3 text-left font-medium">last used</th>
                 <th className="px-4 py-3 text-left font-medium">status</th>
@@ -162,13 +198,13 @@ export default function ApiKeysPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-12 text-center text-zinc-500">
+                  <td colSpan={7} className="px-4 py-12 text-center text-zinc-500">
                     loading…
                   </td>
                 </tr>
               ) : keys.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-12 text-center text-zinc-500">
+                  <td colSpan={7} className="px-4 py-12 text-center text-zinc-500">
                     no keys yet — create one above
                   </td>
                 </tr>
@@ -183,6 +219,14 @@ export default function ApiKeysPage() {
                       <td className="px-4 py-3">{k.label}</td>
                       <td className="px-4 py-3 font-mono text-xs text-zinc-400">
                         {k.prefix}…
+                      </td>
+                      <td className="px-4 py-3 text-right text-xs tabular-nums">
+                        <button
+                          onClick={() => updateLimit(k)}
+                          className="text-zinc-300 hover:text-white underline decoration-dotted"
+                        >
+                          {k.requests_per_minute ?? "∞"}
+                        </button>
                       </td>
                       <td className="px-4 py-3 text-xs text-zinc-400">
                         {new Date(k.created_at).toLocaleString()}

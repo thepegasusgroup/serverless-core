@@ -59,6 +59,27 @@ def verify_agent_secret(
 
 API_KEY_PREFIX = "sc_live_"
 
+# In-memory fixed-window rate limiter: {key_id: (window_start_ts, count)}
+# Runs per-process → 2 Fly machines = 2x effective limit. Acceptable MVP;
+# move to Redis/postgres if we need strict fleet-wide limits.
+_RATE_STATE: dict[str, tuple[float, int]] = {}
+
+
+def _check_rate_limit(key_id: str, per_min: int | None) -> None:
+    if not per_min:
+        return
+    now = time.time()
+    window_start, count = _RATE_STATE.get(key_id, (now, 0))
+    if now - window_start >= 60.0:
+        _RATE_STATE[key_id] = (now, 1)
+        return
+    if count >= per_min:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"Rate limit exceeded ({per_min}/min)",
+        )
+    _RATE_STATE[key_id] = (window_start, count + 1)
+
 
 def require_api_key(
     authorization: str | None = Header(default=None),
@@ -66,8 +87,8 @@ def require_api_key(
 ) -> str:
     """Require a valid `Authorization: Bearer sc_live_...` header.
 
-    Returns the api_keys.id so callers can log usage. Updates last_used_at
-    best-effort.
+    Also enforces the per-key `requests_per_minute` limit. Returns the
+    api_keys.id so callers can log usage.
     """
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing API key")
@@ -78,7 +99,7 @@ def require_api_key(
     key_hash = hashlib.sha256(token.encode()).hexdigest()
     res = (
         sb.table("api_keys")
-        .select("id,revoked_at")
+        .select("id,revoked_at,requests_per_minute")
         .eq("key_hash", key_hash)
         .limit(1)
         .execute()
@@ -89,7 +110,8 @@ def require_api_key(
     if row.get("revoked_at"):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "API key revoked")
 
-    # Best-effort last_used_at update.
+    _check_rate_limit(row["id"], row.get("requests_per_minute"))
+
     try:
         sb.table("api_keys").update({"last_used_at": "now()"}).eq("id", row["id"]).execute()
     except Exception:  # noqa: BLE001

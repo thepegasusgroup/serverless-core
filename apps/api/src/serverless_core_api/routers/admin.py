@@ -253,12 +253,79 @@ def delete_model(
 
 
 # -----------------------------------------------------------------------------
+# Pipelines
+# -----------------------------------------------------------------------------
+
+
+class PipelineIn(BaseModel):
+    slug: str
+    label: str
+    model_slug: str
+    system_prompt: str | None = None
+    enabled: bool = True
+
+
+class PipelinePatch(BaseModel):
+    slug: str | None = None
+    label: str | None = None
+    model_slug: str | None = None
+    system_prompt: str | None = None
+    enabled: bool | None = None
+
+
+@router.get("/pipelines")
+def list_pipelines(sb: Client = Depends(get_service_client)) -> list[dict]:
+    return (
+        sb.table("pipelines")
+        .select("*")
+        .order("created_at", desc=True)
+        .execute()
+        .data
+        or []
+    )
+
+
+@router.post("/pipelines", status_code=status.HTTP_201_CREATED)
+def create_pipeline(
+    body: PipelineIn, sb: Client = Depends(get_service_client)
+) -> dict:
+    res = sb.table("pipelines").insert(body.model_dump()).execute()
+    if not res.data:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Insert returned nothing")
+    return res.data[0]
+
+
+@router.patch("/pipelines/{pid}")
+def update_pipeline(
+    pid: str, body: PipelinePatch, sb: Client = Depends(get_service_client)
+) -> dict:
+    patch = body.model_dump(exclude_unset=True)
+    if not patch:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nothing to update")
+    res = sb.table("pipelines").update(patch).eq("id", pid).execute()
+    if not res.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Pipeline not found")
+    return res.data[0]
+
+
+@router.delete("/pipelines/{pid}")
+def delete_pipeline(pid: str, sb: Client = Depends(get_service_client)) -> dict:
+    sb.table("pipelines").delete().eq("id", pid).execute()
+    return {"ok": True}
+
+
+# -----------------------------------------------------------------------------
 # API keys
 # -----------------------------------------------------------------------------
 
 
 class CreateKeyRequest(BaseModel):
     label: str
+    requests_per_minute: int | None = None
+
+
+class PatchKeyRequest(BaseModel):
+    requests_per_minute: int | None = None
 
 
 @router.post("/api-keys", status_code=status.HTTP_201_CREATED)
@@ -277,8 +344,7 @@ def create_api_key(
                 "key_hash": key_hash,
                 "prefix": prefix,
                 "label": body.label,
-                # created_by left null unless we map email -> auth.users.id;
-                # not critical for M5.
+                "requests_per_minute": body.requests_per_minute,
             }
         )
         .execute()
@@ -289,8 +355,24 @@ def create_api_key(
         "label": row["label"],
         "prefix": prefix,
         "key": token,  # plaintext — shown ONCE, never returned again
+        "requests_per_minute": row["requests_per_minute"],
         "created_at": row["created_at"],
     }
+
+
+@router.patch("/api-keys/{key_id}")
+def patch_api_key(
+    key_id: str,
+    body: PatchKeyRequest,
+    sb: Client = Depends(get_service_client),
+) -> dict:
+    patch = body.model_dump(exclude_unset=True)
+    if not patch:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nothing to update")
+    res = sb.table("api_keys").update(patch).eq("id", key_id).execute()
+    if not res.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Key not found")
+    return res.data[0]
 
 
 @router.get("/api-keys")

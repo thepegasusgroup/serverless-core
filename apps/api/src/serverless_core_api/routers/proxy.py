@@ -94,17 +94,21 @@ async def _proxy(
     sb: Client,
     api_key_id: str | None = None,
 ) -> Response | StreamingResponse:
-    t0 = time.perf_counter()
     try:
         body: dict[str, Any] = await request.json()
     except Exception as e:
-        _log_request(
-            sb, api_key_id=api_key_id, instance_id=None, model_slug=None,
-            path=path, streaming=False, status_code=400,
-            latency_ms=int((time.perf_counter() - t0) * 1000),
-            error=f"invalid JSON: {e}",
-        )
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid JSON: {e}")
+    return await _proxy_with_body(path, body, request, sb, api_key_id=api_key_id)
+
+
+async def _proxy_with_body(
+    path: str,
+    body: dict[str, Any],
+    request: Request,
+    sb: Client,
+    api_key_id: str | None = None,
+) -> Response | StreamingResponse:
+    t0 = time.perf_counter()
 
     model = body.get("model")
     if not model:
@@ -236,6 +240,59 @@ async def chat_completions(
     api_key_id: str = Depends(require_api_key),
 ):
     return await _proxy("/v1/chat/completions", request, sb, api_key_id=api_key_id)
+
+
+@router.post("/v1/pipelines/{slug}/chat")
+async def pipeline_chat(
+    slug: str,
+    request: Request,
+    sb: Client = Depends(get_service_client),
+    api_key_id: str = Depends(require_api_key),
+):
+    """Run a preset pipeline — model + system prompt baked in.
+
+    Clients send normal chat body (messages/stream/etc.); we inject the
+    pipeline's system prompt at the front of `messages` and force the
+    pipeline's model_slug.
+    """
+    res = (
+        sb.table("pipelines")
+        .select("*")
+        .eq("slug", slug)
+        .eq("enabled", True)
+        .limit(1)
+        .execute()
+    )
+    if not res.data:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, f"Pipeline '{slug}' not found or disabled"
+        )
+    pipe = res.data[0]
+
+    try:
+        body: dict[str, Any] = await request.json()
+    except Exception as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid JSON: {e}")
+
+    # Force the model + inject system prompt.
+    body["model"] = pipe["model_slug"]
+    messages = body.get("messages") or []
+    if pipe.get("system_prompt"):
+        # Prepend only if not already a system message.
+        if not messages or messages[0].get("role") != "system":
+            messages = [
+                {"role": "system", "content": pipe["system_prompt"]},
+                *messages,
+            ]
+        body["messages"] = messages
+
+    # Rewrap request.json() result — FastAPI already consumed the body, so
+    # we monkey-patch by passing via a wrapper Request that yields body on
+    # demand. Simplest: build a synthetic Request via httpx path — but that
+    # adds complexity. Instead, call the core logic directly with the body.
+    return await _proxy_with_body(
+        "/v1/chat/completions", body, request, sb, api_key_id=api_key_id
+    )
 
 
 @router.post("/v1/completions")
