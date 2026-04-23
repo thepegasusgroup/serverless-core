@@ -60,6 +60,7 @@ async def list_offers(
         description="Comma-separated country codes to allow back in, e.g. 'CN,RU'",
     ),
     limit: int = Query(default=50, ge=1, le=200),
+    sb: Client = Depends(get_service_client),
 ) -> list[Offer]:
     vast: VastClient = request.app.state.vast
     query = build_offer_query(
@@ -94,6 +95,14 @@ async def list_offers(
         allowlist = {c.strip().upper() for c in include_blocked.split(",") if c.strip()}
     effective_blocklist = _BLOCKED_COUNTRIES - allowlist
     raw = [o for o in raw if _country_code(o) not in effective_blocklist]
+
+    # Known-bad machines we've rented before that failed with host-level bugs.
+    bad_rows = (
+        sb.table("bad_machines").select("machine_id").execute().data or []
+    )
+    bad_ids = {int(r["machine_id"]) for r in bad_rows}
+    if bad_ids:
+        raw = [o for o in raw if o.get("machine_id") not in bad_ids]
 
     offers = [Offer.from_vast(o) for o in raw]
     offers.sort(key=lambda o: o.dph)
@@ -174,3 +183,27 @@ async def destroy(
         )
     except ValueError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
+
+
+@router.get("/instances/{instance_id}/logs")
+async def instance_logs(
+    instance_id: str,
+    request: Request,
+    tail: int = Query(default=200, ge=1, le=2000),
+    sb: Client = Depends(get_service_client),
+) -> dict:
+    res = sb.table("instances").select("vast_contract_id").eq("id", instance_id).limit(1).execute()
+    if not res.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Instance not found")
+    contract_id = res.data[0].get("vast_contract_id")
+    if not contract_id:
+        return {"logs": "", "note": "Instance has no vast contract ID yet."}
+
+    vast: VastClient = request.app.state.vast
+    try:
+        text = await vast.get_instance_logs(int(contract_id), tail=tail)
+    except Exception as e:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, f"vast.ai logs failed: {e}"
+        ) from e
+    return {"logs": text}

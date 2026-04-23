@@ -121,3 +121,39 @@ class VastClient:
         r = await self._client.get(f"/instances/{contract_id}/")
         r.raise_for_status()
         return r.json()
+
+    async def get_instance_logs(
+        self, contract_id: int, tail: int = 200
+    ) -> str:
+        """Fetch the container logs from vast.ai.
+
+        Two-step flow: ask vast to materialise a log blob, then HTTP-GET it.
+        """
+        # 1. Request log generation.
+        r = await self._client.put(
+            f"/instances/request_logs/{contract_id}/",
+            json={"tail": str(tail)},
+        )
+        r.raise_for_status()
+        data = r.json()
+        log_url = data.get("result_url") or data.get("url")
+        if not log_url:
+            return ""
+
+        # 2. Fetch from the signed URL (different host, no auth header).
+        import httpx as _httpx  # local import to avoid top-level churn
+
+        async with _httpx.AsyncClient(timeout=30.0) as anon:
+            # Vast signed URLs sometimes 404 momentarily while the blob is
+            # being uploaded; retry a handful of times.
+            for _ in range(6):
+                resp = await anon.get(log_url)
+                if resp.status_code == 200:
+                    return resp.text
+                if resp.status_code == 404:
+                    import asyncio as _asyncio
+
+                    await _asyncio.sleep(1.0)
+                    continue
+                resp.raise_for_status()
+        return ""
