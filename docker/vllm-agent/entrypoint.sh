@@ -6,7 +6,7 @@ set -Eeuo pipefail
 : "${SC_MODEL_SLUG:?SC_MODEL_SLUG is required}"
 : "${SC_CONTROL_URL:?SC_CONTROL_URL is required}"
 : "${SC_AGENT_SECRET:?SC_AGENT_SECRET is required}"
-: "${SC_VAST_CONTRACT_ID:?SC_VAST_CONTRACT_ID is required}"
+: "${SC_INSTANCE_ID:?SC_INSTANCE_ID is required}"
 
 VLLM_ARGS="${VLLM_ARGS:-}"
 
