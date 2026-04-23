@@ -33,6 +33,55 @@ export default function RunPage() {
   }>({});
   const abortRef = useRef<AbortController | null>(null);
 
+  // Debug event log — mix of client events + Supabase Realtime instance changes.
+  type Event = {
+    t: number; // ms since run start
+    kind: "info" | "net" | "warn" | "error" | "instance";
+    text: string;
+  };
+  const [events, setEvents] = useState<Event[]>([]);
+  const runStartRef = useRef<number>(0);
+  const logEl = useRef<HTMLDivElement>(null);
+
+  const logEvt = useCallback((kind: Event["kind"], text: string) => {
+    const t = runStartRef.current
+      ? Math.max(0, performance.now() - runStartRef.current)
+      : 0;
+    setEvents((prev) => [...prev, { t, kind, text }]);
+    setTimeout(() => {
+      const el = logEl.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    }, 0);
+  }, []);
+
+  // Subscribe to instance status changes for live backend visibility.
+  useEffect(() => {
+    const supabase = createClient();
+    const ch = supabase
+      .channel("run-instance-watch")
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "instances" },
+        (payload) => {
+          const next = payload.new as {
+            id: string;
+            status: string;
+            stage_msg?: string | null;
+          };
+          if (!runStartRef.current) return; // only log during a run
+          const short = next.id.slice(0, 8);
+          const msg = next.stage_msg
+            ? `${short} → ${next.status} · ${next.stage_msg}`
+            : `${short} → ${next.status}`;
+          logEvt("instance", msg);
+        },
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(ch);
+    };
+  }, [logEvt]);
+
   useEffect(() => {
     const supabase = createClient();
     supabase
@@ -66,12 +115,15 @@ export default function RunPage() {
     }
     setResponse("");
     setMetrics({});
+    setEvents([]);
     setRunning(true);
     const ac = new AbortController();
     abortRef.current = ac;
     const t0 = performance.now();
+    runStartRef.current = t0;
     let ttfbMs: number | undefined;
     let tokenCount = 0;
+    logEvt("info", `Run started · model=${modelSlug} · stream=${streaming}`);
 
     const messages = systemPrompt.trim()
       ? [
@@ -95,6 +147,7 @@ export default function RunPage() {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL || "";
 
     try {
+      logEvt("net", `POST ${apiUrl}/admin/playground/chat`);
       const res = await fetch(`${apiUrl}/admin/playground/chat`, {
         method: "POST",
         headers: {
@@ -104,6 +157,7 @@ export default function RunPage() {
         body: JSON.stringify(body),
         signal: ac.signal,
       });
+      logEvt("net", `Headers received · HTTP ${res.status}`);
 
       if (!res.ok) {
         const text = await res.text();
@@ -120,6 +174,10 @@ export default function RunPage() {
           totalMs: ttfbMs,
           tokens: data.usage?.completion_tokens,
         });
+        logEvt(
+          "info",
+          `Complete · ${ttfbMs}ms · ${data.usage?.completion_tokens ?? "?"} tokens`,
+        );
       } else {
         const reader = res.body!.getReader();
         const decoder = new TextDecoder();
@@ -142,6 +200,7 @@ export default function RunPage() {
                 if (ttfbMs === undefined) {
                   ttfbMs = Math.round(performance.now() - t0);
                   setMetrics((m) => ({ ...m, ttfbMs }));
+                  logEvt("net", `First token · TTFB ${ttfbMs}ms`);
                 }
                 tokenCount += 1;
                 setResponse((p) => p + delta);
@@ -151,22 +210,23 @@ export default function RunPage() {
             }
           }
         }
-        setMetrics({
-          ttfbMs,
-          totalMs: Math.round(performance.now() - t0),
-          tokens: tokenCount,
-        });
+        const totalMs = Math.round(performance.now() - t0);
+        setMetrics({ ttfbMs, totalMs, tokens: tokenCount });
+        logEvt("info", `Stream complete · ${totalMs}ms · ${tokenCount} chunks`);
       }
     } catch (e) {
       if ((e as Error).name === "AbortError") {
         toast.info("Aborted");
+        logEvt("warn", "Request aborted by user");
       } else {
         toast.error((e as Error).message);
         setResponse(`(error: ${(e as Error).message})`);
+        logEvt("error", (e as Error).message);
       }
     } finally {
       setRunning(false);
       abortRef.current = null;
+      runStartRef.current = 0;
     }
   }, [userPrompt, systemPrompt, modelSlug, streaming, temperature, maxTokens]);
 
@@ -274,27 +334,75 @@ export default function RunPage() {
             </div>
           </div>
 
-          {/* RIGHT: response */}
-          <div className="flex flex-col min-h-0">
-            <div className="flex items-center justify-between mb-1">
-              <div className="text-[10px] uppercase tracking-wider text-zinc-500">
-                Response
+          {/* RIGHT: response (top) + debug log (bottom) */}
+          <div className="flex flex-col gap-3 min-h-0">
+            {/* response */}
+            <div className="flex flex-col flex-1 min-h-0">
+              <div className="flex items-center justify-between mb-1">
+                <div className="text-[10px] uppercase tracking-wider text-zinc-500">
+                  Response
+                </div>
+                <div className="flex items-center gap-4 text-[10px] text-zinc-500 tabular-nums">
+                  {metrics.ttfbMs !== undefined && (
+                    <span>TTFB {metrics.ttfbMs}ms</span>
+                  )}
+                  {metrics.totalMs !== undefined && (
+                    <span>total {metrics.totalMs}ms</span>
+                  )}
+                  {metrics.tokens !== undefined && (
+                    <span>{metrics.tokens} tokens</span>
+                  )}
+                </div>
               </div>
-              <div className="flex items-center gap-4 text-[10px] text-zinc-500 tabular-nums">
-                {metrics.ttfbMs !== undefined && (
-                  <span>TTFB {metrics.ttfbMs}ms</span>
-                )}
-                {metrics.totalMs !== undefined && (
-                  <span>total {metrics.totalMs}ms</span>
-                )}
-                {metrics.tokens !== undefined && (
-                  <span>{metrics.tokens} tokens</span>
+              <pre className="flex-1 rounded-lg border border-zinc-800 bg-black p-4 text-sm font-mono text-zinc-200 whitespace-pre-wrap overflow-auto">
+                {response || (running ? "…" : "(output will appear here)")}
+              </pre>
+            </div>
+
+            {/* debug log */}
+            <div className="flex flex-col min-h-0 h-[30%]">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">
+                Pipeline log
+              </div>
+              <div
+                ref={logEl}
+                className="flex-1 rounded-lg border border-zinc-800 bg-zinc-950 p-2 text-[11px] font-mono overflow-auto"
+              >
+                {events.length === 0 ? (
+                  <div className="text-zinc-600 p-2">
+                    (client events + live instance state changes appear here during
+                    a run)
+                  </div>
+                ) : (
+                  events.map((e, i) => (
+                    <div
+                      key={i}
+                      className="flex items-start gap-2 px-1 py-0.5 border-b border-zinc-900 last:border-b-0"
+                    >
+                      <span className="text-zinc-600 tabular-nums w-14 shrink-0">
+                        +{(e.t / 1000).toFixed(2)}s
+                      </span>
+                      <span
+                        className={`uppercase text-[9px] tracking-wider w-16 shrink-0 ${
+                          e.kind === "error"
+                            ? "text-red-400"
+                            : e.kind === "warn"
+                              ? "text-yellow-400"
+                              : e.kind === "instance"
+                                ? "text-blue-400"
+                                : e.kind === "net"
+                                  ? "text-purple-400"
+                                  : "text-zinc-400"
+                        }`}
+                      >
+                        {e.kind}
+                      </span>
+                      <span className="text-zinc-200 break-all">{e.text}</span>
+                    </div>
+                  ))
                 )}
               </div>
             </div>
-            <pre className="flex-1 rounded-lg border border-zinc-800 bg-black p-4 text-sm font-mono text-zinc-200 whitespace-pre-wrap overflow-auto">
-              {response || (running ? "…" : "(output will appear here)")}
-            </pre>
           </div>
         </div>
       </main>
