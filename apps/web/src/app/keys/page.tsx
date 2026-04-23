@@ -250,14 +250,14 @@ export default function ApiKeysPage() {
 }
 
 function summarize(
-  models: string[] | null,
-  pipes: string[] | null,
+  models: string[] | null | undefined,
+  pipes: string[] | null | undefined,
 ): React.ReactNode {
   const parts: string[] = [];
-  if (models === null) parts.push("all models");
+  if (!Array.isArray(models)) parts.push("all models");
   else if (models.length === 0) parts.push("no models");
   else parts.push(`${models.length} model${models.length > 1 ? "s" : ""}`);
-  if (pipes === null) parts.push("all pipelines");
+  if (!Array.isArray(pipes)) parts.push("all pipelines");
   else if (pipes.length === 0) parts.push("no pipelines");
   else parts.push(`${pipes.length} pipeline${pipes.length > 1 ? "s" : ""}`);
   return parts.join(" · ");
