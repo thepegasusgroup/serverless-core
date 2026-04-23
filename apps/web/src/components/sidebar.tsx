@@ -12,6 +12,7 @@ import {
   LogOut,
   Key,
   Terminal,
+  Workflow,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 
@@ -30,6 +31,7 @@ const groups: {
       { href: "/instances", label: "Instances", icon: Server },
       { href: "/instances/new", label: "Rent", icon: Plus },
       { href: "/run", label: "Run", icon: Terminal },
+      { href: "/pipelines", label: "Pipelines", icon: Workflow, disabled: true },
     ],
   },
   {
