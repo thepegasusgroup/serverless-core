@@ -93,15 +93,17 @@ def main() -> int:
         print(f"No access_token in response:\n{session}", file=sys.stderr)
         return 3
 
+    api_url = os.environ.get("PUBLIC_API_URL", "http://localhost:8000").rstrip("/")
     config_dir = Path.home() / ".config" / "serverless-core"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.toml"
     config_path.write_text(
-        f'api_url = "http://localhost:8000"\njwt = "{access_token}"\n',
+        f'api_url = "{api_url}"\njwt = "{access_token}"\n',
         encoding="utf-8",
     )
     print(f"\n✓ Saved access token to {config_path}")
-    print(f"  (len={len(access_token)}, starts with {access_token[:20]}...)")
+    print(f"  api_url = {api_url}")
+    print(f"  (token len={len(access_token)}, starts with {access_token[:20]}...)")
     return 0
 
 

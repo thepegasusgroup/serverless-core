@@ -82,7 +82,13 @@ class VastClient:
         if onstart:
             payload["onstart"] = onstart
         r = await self._client.put(f"/asks/{offer_id}/", json=payload)
-        r.raise_for_status()
+        if r.status_code >= 400:
+            try:
+                body = r.json()
+                msg = body.get("msg") or body.get("error") or r.text
+            except Exception:
+                msg = r.text
+            raise RuntimeError(f"vast.ai create {r.status_code}: {msg}")
         return r.json()
 
     async def destroy_instance(self, contract_id: int) -> dict[str, Any]:
