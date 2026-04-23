@@ -17,7 +17,12 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from supabase import Client
 
 from serverless_core_api.deps import get_service_client, require_api_key
-from serverless_core_api.services.routing import pick_instance
+from serverless_core_api.services.rental import resume_instance
+from serverless_core_api.services.routing import (
+    find_dormant_instance,
+    pick_instance,
+    wait_for_ready,
+)
 
 logger = logging.getLogger("serverless_core_api.proxy")
 
@@ -57,12 +62,42 @@ async def _proxy(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Missing 'model' field")
 
     picked = pick_instance(model, sb)
+
     if not picked:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            f"No healthy instance for model '{model}'",
-        )
-    instance, model_row = picked
+        # Wake-on-request: if a paused / waking instance exists, resume it
+        # and block this request until vLLM is healthy again.
+        dormant = find_dormant_instance(model, sb)
+        if not dormant:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                f"No instance for model '{model}' (none ready or paused)",
+            )
+        instance, model_row = dormant
+        if instance["status"] == "paused":
+            logger.info(
+                "Wake-on-request: resuming %s for model=%s",
+                instance["id"], model,
+            )
+            try:
+                await resume_instance(
+                    instance_id=instance["id"],
+                    vast=request.app.state.vast,
+                    sb=sb,
+                )
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(
+                    status.HTTP_502_BAD_GATEWAY, f"Resume failed: {e}"
+                ) from e
+
+        ready = await wait_for_ready(instance["id"], sb)
+        if not ready:
+            raise HTTPException(
+                status.HTTP_504_GATEWAY_TIMEOUT,
+                "Instance woke but vLLM did not become healthy in time",
+            )
+        instance = ready
+    else:
+        instance, model_row = picked
 
     # Stamp last_request_at so the idle auto-pauser knows this box is in use.
     try:
