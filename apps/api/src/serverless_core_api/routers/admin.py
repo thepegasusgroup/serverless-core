@@ -18,6 +18,12 @@ _REGION_SETS: dict[str, set[str]] = {
     "na": {"US", "CA"},
 }
 
+# Countries blocked by default. Reasons:
+#   CN — Great Firewall: GHCR pulls frequently blocked/throttled, HF slow.
+#   RU, BY, IR, KP, SY — sanctions + inconsistent access to HF/GitHub.
+# Override per-request via ?include_blocked=CN,RU etc.
+_BLOCKED_COUNTRIES: set[str] = {"CN", "RU", "BY", "IR", "KP", "SY"}
+
 
 def _country_code(offer: dict) -> str:
     g = offer.get("geolocation") or ""
@@ -41,6 +47,10 @@ async def list_offers(
     num_gpus: int = Query(default=1, ge=1, le=8),
     min_reliability: float = Query(default=0.95, ge=0.0, le=1.0),
     region: str | None = Query(default=None, description="'eu' | 'us' | 'na' | none"),
+    include_blocked: str | None = Query(
+        default=None,
+        description="Comma-separated country codes to allow back in, e.g. 'CN,RU'",
+    ),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> list[Offer]:
     vast: VastClient = request.app.state.vast
@@ -66,6 +76,12 @@ async def list_offers(
                 f"Unknown region '{region}' (use eu, us, na, or omit)",
             )
         raw = [o for o in raw if _country_code(o) in target]
+
+    allowlist: set[str] = set()
+    if include_blocked:
+        allowlist = {c.strip().upper() for c in include_blocked.split(",") if c.strip()}
+    effective_blocklist = _BLOCKED_COUNTRIES - allowlist
+    raw = [o for o in raw if _country_code(o) not in effective_blocklist]
 
     offers = [Offer.from_vast(o) for o in raw]
     offers.sort(key=lambda o: o.dph)

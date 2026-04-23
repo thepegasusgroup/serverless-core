@@ -21,6 +21,11 @@ def search(
     region: Optional[str] = typer.Option(
         None, "--region", help="'eu' | 'us' | 'na'"
     ),
+    include_blocked: Optional[str] = typer.Option(
+        None,
+        "--include-blocked",
+        help="Comma-separated country codes to allow past the default block list",
+    ),
     limit: int = typer.Option(20, "--limit"),
     json_output: bool = typer.Option(False, "--json", help="Emit raw JSON"),
 ) -> None:
@@ -43,6 +48,8 @@ def search(
         params["min_vram"] = min_vram
     if region:
         params["region"] = region
+    if include_blocked:
+        params["include_blocked"] = include_blocked
 
     url = cfg.api_url.rstrip("/") + "/admin/offers"
     headers = {"Authorization": f"Bearer {cfg.jwt}"}
