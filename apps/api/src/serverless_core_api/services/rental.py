@@ -54,12 +54,16 @@ async def rent_instance(
     }
 
     label = f"sc-{model['slug']}-{instance_id[:8]}"
-    logger.info("Creating vast instance offer=%s label=%s", offer_id, label)
+    # vLLM image unpacks to ~25GB + model weights (~15GB for 7B, more for bigger) +
+    # safety headroom for HF cache and /tmp. 60GB covers us through ~20B models.
+    disk_gb = 60
+    logger.info("Creating vast instance offer=%s label=%s disk=%sGB",
+                offer_id, label, disk_gb)
     vast_res = await vast.create_instance(
         offer_id=offer_id,
         image=model["docker_image"],
         env=env,
-        disk_gb=40,
+        disk_gb=disk_gb,
         label=label,
     )
     if not vast_res.get("success", False):
