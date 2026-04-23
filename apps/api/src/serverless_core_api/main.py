@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client
 
 from serverless_core_api.config import get_settings
-from serverless_core_api.routers import admin, health, internal
+from serverless_core_api.routers import admin, health, internal, proxy
 from serverless_core_api.services.status_poller import poll_forever
 from serverless_core_api.vast import VastClient
 
@@ -58,6 +58,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(admin.router)
     app.include_router(internal.router)
+    app.include_router(proxy.router)
     return app
 
 
