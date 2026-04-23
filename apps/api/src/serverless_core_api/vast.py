@@ -117,6 +117,22 @@ class VastClient:
         r.raise_for_status()
         return r.json() if r.content else {}
 
+    async def pause_instance(self, contract_id: int) -> dict[str, Any]:
+        """Stop the container but keep the disk (model cache survives)."""
+        r = await self._client.put(
+            f"/instances/{contract_id}/", json={"state": "stopped"}
+        )
+        r.raise_for_status()
+        return r.json() if r.content else {}
+
+    async def resume_instance(self, contract_id: int) -> dict[str, Any]:
+        """Restart a previously paused instance."""
+        r = await self._client.put(
+            f"/instances/{contract_id}/", json={"state": "running"}
+        )
+        r.raise_for_status()
+        return r.json() if r.content else {}
+
     async def show_instance(self, contract_id: int) -> dict[str, Any]:
         r = await self._client.get(f"/instances/{contract_id}/")
         r.raise_for_status()

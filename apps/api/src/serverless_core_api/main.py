@@ -8,6 +8,7 @@ from supabase import create_client
 
 from serverless_core_api.config import get_settings
 from serverless_core_api.routers import admin, health, internal, proxy
+from serverless_core_api.services.idle_pauser import run_forever as idle_run_forever
 from serverless_core_api.services.status_poller import poll_forever
 from serverless_core_api.vast import VastClient
 
@@ -32,15 +33,19 @@ async def lifespan(app: FastAPI):
     poller_task = asyncio.create_task(
         poll_forever(app.state.vast, app.state.sb_service)
     )
+    idle_task = asyncio.create_task(
+        idle_run_forever(app.state.vast, app.state.sb_service)
+    )
 
     try:
         yield
     finally:
-        poller_task.cancel()
-        try:
-            await poller_task
-        except asyncio.CancelledError:
-            pass
+        for t in (poller_task, idle_task):
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
         await app.state.vast.aclose()
 
 

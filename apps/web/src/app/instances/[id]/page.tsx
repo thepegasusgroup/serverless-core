@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { toast } from "sonner";
-import { ArrowLeft, RefreshCw } from "lucide-react";
+import { ArrowLeft, RefreshCw, Pause, Play } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { api } from "@/lib/api";
 import { AppShell } from "@/components/app-shell";
@@ -129,6 +129,28 @@ export default function InstanceDetailPage() {
     }
   };
 
+  const pause = async () => {
+    if (!confirm("Pause? vast stops the GPU; disk (with model cache) is kept."))
+      return;
+    try {
+      await api(`/admin/instances/${id}/pause`, { method: "POST" });
+      toast.success("Paused");
+      fetchInstance();
+    } catch (e) {
+      toast.error(`Pause failed: ${(e as Error).message}`);
+    }
+  };
+
+  const resume = async () => {
+    try {
+      await api(`/admin/instances/${id}/resume`, { method: "POST" });
+      toast.success("Resuming — vLLM boot takes ~1-2 min");
+      fetchInstance();
+    } catch (e) {
+      toast.error(`Resume failed: ${(e as Error).message}`);
+    }
+  };
+
   return (
     <AppShell>
       <main className="min-h-screen p-8 max-w-6xl mx-auto">
@@ -158,13 +180,31 @@ export default function InstanceDetailPage() {
             )}
           </div>
           {instance && instance.status !== "destroyed" && (
-            <button
-              onClick={destroy}
-              disabled={destroying}
-              className="rounded border border-red-900 bg-red-950/40 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-red-950/70 disabled:opacity-60"
-            >
-              {destroying ? "Destroying…" : "Destroy"}
-            </button>
+            <div className="flex items-center gap-2">
+              {instance.status === "ready" && (
+                <button
+                  onClick={pause}
+                  className="flex items-center gap-1.5 rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
+                >
+                  <Pause className="h-3 w-3" /> Pause
+                </button>
+              )}
+              {instance.status === "paused" && (
+                <button
+                  onClick={resume}
+                  className="flex items-center gap-1.5 rounded border border-blue-900 bg-blue-950/40 px-3 py-1.5 text-xs font-medium text-blue-300 hover:bg-blue-950/70"
+                >
+                  <Play className="h-3 w-3" /> Resume
+                </button>
+              )}
+              <button
+                onClick={destroy}
+                disabled={destroying}
+                className="rounded border border-red-900 bg-red-950/40 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-red-950/70 disabled:opacity-60"
+              >
+                {destroying ? "Destroying…" : "Destroy"}
+              </button>
+            </div>
           )}
         </header>
 

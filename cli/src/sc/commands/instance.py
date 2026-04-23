@@ -131,3 +131,23 @@ def show(
     r = _authed_request("GET", f"/admin/instances/{instance_id}")
     _check(r)
     console.print_json(data=r.json())
+
+
+def pause(
+    instance_id: str = typer.Argument(..., help="instance UUID"),
+) -> None:
+    """Pause an instance (vast stops GPU; disk/model cache kept)."""
+    r = _authed_request("POST", f"/admin/instances/{instance_id}/pause")
+    _check(r)
+    console.print("[yellow]Paused.[/yellow] Resume later with `scx instance resume`.")
+
+
+def resume(
+    instance_id: str = typer.Argument(..., help="instance UUID"),
+) -> None:
+    """Resume a paused instance (warm boot: model already cached)."""
+    r = _authed_request("POST", f"/admin/instances/{instance_id}/resume")
+    _check(r)
+    console.print(
+        "[blue]Resuming.[/blue] vLLM boot takes ~1-2 min, then ready."
+    )

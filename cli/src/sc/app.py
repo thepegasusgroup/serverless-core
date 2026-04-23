@@ -18,6 +18,8 @@ instance_app.command("rent")(instance_commands.rent)
 instance_app.command("list")(instance_commands.list_cmd)
 instance_app.command("destroy")(instance_commands.destroy)
 instance_app.command("show")(instance_commands.show)
+instance_app.command("pause")(instance_commands.pause)
+instance_app.command("resume")(instance_commands.resume)
 app.add_typer(instance_app, name="instance")
 
 key_app = typer.Typer(help="Create / list / revoke API keys for /v1/* clients.")

@@ -64,6 +64,14 @@ async def _proxy(
         )
     instance, model_row = picked
 
+    # Stamp last_request_at so the idle auto-pauser knows this box is in use.
+    try:
+        sb.table("instances").update({"last_request_at": "now()"}).eq(
+            "id", instance["id"]
+        ).execute()
+    except Exception:  # noqa: BLE001
+        pass
+
     # Rewrite body.model to what vLLM expects (HF repo path).
     body["model"] = model_row["hf_repo"]
 

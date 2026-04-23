@@ -102,6 +102,60 @@ async def rent_instance(
     return insert.data[0] if insert.data else row
 
 
+async def pause_instance(
+    *,
+    instance_id: str,
+    vast: VastClient,
+    sb: Client,
+) -> dict[str, Any]:
+    res = sb.table("instances").select("*").eq("id", instance_id).limit(1).execute()
+    if not res.data:
+        raise ValueError("instance not found")
+    row = res.data[0]
+    if row["status"] in ("paused", "destroyed"):
+        return {"ok": True, "already": row["status"]}
+    contract_id = row.get("vast_contract_id")
+    if not contract_id:
+        raise ValueError("instance has no vast contract id")
+
+    await vast.pause_instance(int(contract_id))
+    update = (
+        sb.table("instances")
+        .update({"status": "paused", "paused_at": "now()"})
+        .eq("id", instance_id)
+        .execute()
+    )
+    return {"ok": True, "row": update.data[0] if update.data else None}
+
+
+async def resume_instance(
+    *,
+    instance_id: str,
+    vast: VastClient,
+    sb: Client,
+) -> dict[str, Any]:
+    res = sb.table("instances").select("*").eq("id", instance_id).limit(1).execute()
+    if not res.data:
+        raise ValueError("instance not found")
+    row = res.data[0]
+    if row["status"] in ("ready", "waking", "provisioning", "booting"):
+        return {"ok": True, "already": row["status"]}
+    if row["status"] == "destroyed":
+        raise ValueError("cannot resume a destroyed instance — rent a new one")
+    contract_id = row.get("vast_contract_id")
+    if not contract_id:
+        raise ValueError("instance has no vast contract id")
+
+    await vast.resume_instance(int(contract_id))
+    update = (
+        sb.table("instances")
+        .update({"status": "waking"})
+        .eq("id", instance_id)
+        .execute()
+    )
+    return {"ok": True, "row": update.data[0] if update.data else None}
+
+
 async def destroy_instance(
     *,
     instance_id: str,

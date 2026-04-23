@@ -9,7 +9,12 @@ from supabase import Client
 from serverless_core_api.config import Settings, get_settings
 from serverless_core_api.deps import get_service_client, get_staff_user
 from serverless_core_api.models.offer import Offer
-from serverless_core_api.services.rental import destroy_instance, rent_instance
+from serverless_core_api.services.rental import (
+    destroy_instance,
+    pause_instance,
+    rent_instance,
+    resume_instance,
+)
 from serverless_core_api.vast import VastClient, build_offer_query
 
 _REGION_SETS: dict[str, set[str]] = {
@@ -263,6 +268,32 @@ async def destroy(
         )
     except ValueError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
+
+
+@router.post("/instances/{instance_id}/pause")
+async def pause(
+    instance_id: str,
+    request: Request,
+    sb: Client = Depends(get_service_client),
+) -> dict:
+    vast: VastClient = request.app.state.vast
+    try:
+        return await pause_instance(instance_id=instance_id, vast=vast, sb=sb)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
+
+
+@router.post("/instances/{instance_id}/resume")
+async def resume(
+    instance_id: str,
+    request: Request,
+    sb: Client = Depends(get_service_client),
+) -> dict:
+    vast: VastClient = request.app.state.vast
+    try:
+        return await resume_instance(instance_id=instance_id, vast=vast, sb=sb)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
 
 
 @router.get("/instances/{instance_id}/debug")
