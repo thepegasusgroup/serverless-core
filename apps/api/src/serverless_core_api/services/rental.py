@@ -54,9 +54,10 @@ async def rent_instance(
     }
 
     label = f"sc-{model['slug']}-{instance_id[:8]}"
-    # vLLM image unpacks to ~25GB + model weights (~15GB for 7B, more for bigger) +
-    # safety headroom for HF cache and /tmp. 60GB covers us through ~20B models.
-    disk_gb = 60
+    # vLLM's image unpacks to ~35-40GB (CUDA + PyTorch + compiled kernels)
+    # + weights (15GB for 7B, more for bigger) + HF cache + tmp. 60GB was
+    # consistently hitting "no space left on device" during extraction.
+    disk_gb = 80
     logger.info("Creating vast instance offer=%s label=%s disk=%sGB",
                 offer_id, label, disk_gb)
     vast_res = await vast.create_instance(
