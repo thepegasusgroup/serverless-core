@@ -12,19 +12,31 @@ type Pipeline = {
   label: string;
   model_slug: string;
   system_prompt: string | null;
+  user_template: string | null;
+  vllm_overrides: Record<string, unknown> | null;
+  response_format: string | null;
+  response_schema: Record<string, unknown> | null;
+  output_mode: string | null;
+  webhook_url: string | null;
+  webhook_headers: Record<string, string> | null;
+  timeout_seconds: number | null;
   enabled: boolean;
   created_at: string;
 };
 
 type Model = { id: string; slug: string };
 
-const EMPTY: Omit<Pipeline, "id" | "created_at"> = {
-  slug: "",
-  label: "",
-  model_slug: "",
-  system_prompt: "",
-  enabled: true,
-};
+const OUTPUT_MODES = [
+  { value: "return", label: "Return to caller" },
+  { value: "webhook", label: "POST to webhook" },
+  { value: "json_only", label: "Parse + return JSON only" },
+] as const;
+
+const RESPONSE_FORMATS = [
+  { value: "text", label: "Free-form text" },
+  { value: "json_object", label: "JSON object (any shape)" },
+  { value: "json_schema", label: "JSON matching a schema" },
+] as const;
 
 export default function PipelinesPage() {
   const [rows, setRows] = useState<Pipeline[]>([]);
@@ -74,7 +86,7 @@ export default function PipelinesPage() {
           <div>
             <h1 className="text-3xl font-semibold">Pipelines</h1>
             <p className="text-sm text-zinc-500 mt-1">
-              Named presets — model + system prompt. Clients POST to{" "}
+              Input/Process/Output presets. Clients POST to{" "}
               <code className="text-zinc-300">
                 /v1/pipelines/&lt;slug&gt;/chat
               </code>
@@ -94,10 +106,10 @@ export default function PipelinesPage() {
             <thead className="bg-zinc-900/60 text-xs uppercase tracking-wider text-zinc-500">
               <tr>
                 <th className="px-4 py-3 text-left font-medium">slug</th>
-                <th className="px-4 py-3 text-left font-medium">label</th>
                 <th className="px-4 py-3 text-left font-medium">model</th>
-                <th className="px-4 py-3 text-left font-medium">system</th>
-                <th className="px-4 py-3 text-left font-medium">enabled</th>
+                <th className="px-4 py-3 text-left font-medium">output</th>
+                <th className="px-4 py-3 text-left font-medium">format</th>
+                <th className="px-4 py-3 text-left font-medium">status</th>
                 <th className="px-4 py-3"></th>
               </tr>
             </thead>
@@ -111,7 +123,7 @@ export default function PipelinesPage() {
               ) : rows.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="px-4 py-12 text-center text-zinc-500">
-                    no pipelines — click <b>Add pipeline</b>
+                    no pipelines yet — click <b>Add pipeline</b>
                   </td>
                 </tr>
               ) : (
@@ -122,13 +134,19 @@ export default function PipelinesPage() {
                   >
                     <td className="px-4 py-3 font-mono text-xs text-zinc-100">
                       {p.slug}
+                      <div className="text-[10px] text-zinc-500 mt-0.5">
+                        {p.label}
+                      </div>
                     </td>
-                    <td className="px-4 py-3 text-xs">{p.label}</td>
                     <td className="px-4 py-3 font-mono text-xs text-zinc-400">
                       {p.model_slug}
                     </td>
-                    <td className="px-4 py-3 text-xs text-zinc-400 max-w-xs truncate">
-                      {p.system_prompt || "(none)"}
+                    <td className="px-4 py-3 text-xs">
+                      {OUTPUT_MODES.find((m) => m.value === p.output_mode)?.label ??
+                        p.output_mode}
+                    </td>
+                    <td className="px-4 py-3 text-xs text-zinc-400">
+                      {p.response_format ?? "text"}
                     </td>
                     <td className="px-4 py-3">
                       <button
@@ -176,7 +194,7 @@ export default function PipelinesPage() {
 
         {creating && (
           <Dialog
-            initial={EMPTY}
+            initial={null}
             models={models}
             title="Add pipeline"
             onClose={() => setCreating(false)}
@@ -220,24 +238,62 @@ function Dialog({
   onSave,
   onClose,
 }: {
-  initial: Partial<Pipeline>;
+  initial: Pipeline | null;
   models: Model[];
   title: string;
   onSave: (d: Partial<Pipeline>) => Promise<void>;
   onClose: () => void;
 }) {
-  const [slug, setSlug] = useState(initial.slug ?? "");
-  const [label, setLabel] = useState(initial.label ?? "");
-  const [modelSlug, setModelSlug] = useState(
-    initial.model_slug ?? models[0]?.slug ?? "",
-  );
+  const [tab, setTab] = useState<"input" | "process" | "output">("input");
+
+  // Basics
+  const [slug, setSlug] = useState(initial?.slug ?? "");
+  const [label, setLabel] = useState(initial?.label ?? "");
+  const [enabled, setEnabled] = useState(initial?.enabled ?? true);
+
+  // Input
   const [systemPrompt, setSystemPrompt] = useState(
-    initial.system_prompt ?? "",
+    initial?.system_prompt ?? "",
   );
-  const [enabled, setEnabled] = useState(initial.enabled ?? true);
+  const [userTemplate, setUserTemplate] = useState(
+    initial?.user_template ?? "",
+  );
+
+  // Process
+  const [modelSlug, setModelSlug] = useState(
+    initial?.model_slug ?? models[0]?.slug ?? "",
+  );
+  const [vllmOverrides, setVllmOverrides] = useState(
+    JSON.stringify(initial?.vllm_overrides ?? {}, null, 2),
+  );
+  const [respFmt, setRespFmt] = useState(initial?.response_format ?? "text");
+  const [respSchema, setRespSchema] = useState(
+    JSON.stringify(initial?.response_schema ?? {}, null, 2),
+  );
+
+  // Output
+  const [outputMode, setOutputMode] = useState(initial?.output_mode ?? "return");
+  const [webhookUrl, setWebhookUrl] = useState(initial?.webhook_url ?? "");
+  const [webhookHeaders, setWebhookHeaders] = useState(
+    JSON.stringify(initial?.webhook_headers ?? {}, null, 2),
+  );
+  const [timeout, setTimeout_] = useState(initial?.timeout_seconds ?? 120);
+
   const [saving, setSaving] = useState(false);
 
   const save = async () => {
+    let parsedOverrides: Record<string, unknown>;
+    let parsedSchema: Record<string, unknown> | null;
+    let parsedHeaders: Record<string, string>;
+    try {
+      parsedOverrides = JSON.parse(vllmOverrides || "{}");
+      parsedSchema =
+        respFmt === "json_schema" ? JSON.parse(respSchema || "{}") : null;
+      parsedHeaders = JSON.parse(webhookHeaders || "{}");
+    } catch (e) {
+      toast.error(`JSON parse error: ${(e as Error).message}`);
+      return;
+    }
     setSaving(true);
     try {
       await onSave({
@@ -245,6 +301,14 @@ function Dialog({
         label,
         model_slug: modelSlug,
         system_prompt: systemPrompt || null,
+        user_template: userTemplate || null,
+        vllm_overrides: parsedOverrides,
+        response_format: respFmt,
+        response_schema: parsedSchema,
+        output_mode: outputMode,
+        webhook_url: outputMode === "webhook" ? webhookUrl : null,
+        webhook_headers: outputMode === "webhook" ? parsedHeaders : {},
+        timeout_seconds: timeout,
         enabled,
       });
     } catch (e) {
@@ -260,11 +324,13 @@ function Dialog({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-xl rounded-xl border border-zinc-800 bg-zinc-950 p-5"
+        className="w-full max-w-2xl rounded-xl border border-zinc-800 bg-zinc-950 p-5 max-h-[90vh] overflow-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-lg font-semibold mb-4">{title}</h2>
-        <div className="space-y-3">
+
+        {/* Basics */}
+        <div className="grid grid-cols-2 gap-3 mb-4">
           <F label="Slug" hint="url-safe, e.g. customer-support-v1">
             <input
               value={slug}
@@ -279,28 +345,160 @@ function Dialog({
               className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
             />
           </F>
-          <F label="Model">
-            <select
-              value={modelSlug}
-              onChange={(e) => setModelSlug(e.target.value)}
-              className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
+        </div>
+
+        {/* Tabs */}
+        <div className="flex border-b border-zinc-800 mb-4 text-sm">
+          {(["input", "process", "output"] as const).map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={`px-4 py-2 border-b-2 -mb-px capitalize ${
+                tab === t
+                  ? "border-zinc-100 text-zinc-100"
+                  : "border-transparent text-zinc-500 hover:text-zinc-200"
+              }`}
             >
-              {models.map((m) => (
-                <option key={m.id} value={m.slug}>
-                  {m.slug}
-                </option>
-              ))}
-            </select>
-          </F>
-          <F label="System prompt">
-            <textarea
-              value={systemPrompt}
-              onChange={(e) => setSystemPrompt(e.target.value)}
-              rows={5}
-              placeholder="You are a helpful..."
-              className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm font-mono"
-            />
-          </F>
+              {t === "input"
+                ? "1. Input"
+                : t === "process"
+                  ? "2. Process"
+                  : "3. Output"}
+            </button>
+          ))}
+        </div>
+
+        {tab === "input" && (
+          <div className="space-y-3">
+            <F
+              label="System prompt"
+              hint="Prepended to every request as role=system."
+            >
+              <textarea
+                value={systemPrompt}
+                onChange={(e) => setSystemPrompt(e.target.value)}
+                rows={4}
+                placeholder="You are a helpful assistant..."
+                className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm font-mono"
+              />
+            </F>
+            <F
+              label="User message template"
+              hint="Wraps the user's content. Use {{input}} as placeholder. Leave blank to pass through."
+            >
+              <textarea
+                value={userTemplate}
+                onChange={(e) => setUserTemplate(e.target.value)}
+                rows={3}
+                placeholder="Summarize in 3 bullets: {{input}}"
+                className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm font-mono"
+              />
+            </F>
+          </div>
+        )}
+
+        {tab === "process" && (
+          <div className="space-y-3">
+            <F label="Model">
+              <select
+                value={modelSlug}
+                onChange={(e) => setModelSlug(e.target.value)}
+                className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
+              >
+                {models.map((m) => (
+                  <option key={m.id} value={m.slug}>
+                    {m.slug}
+                  </option>
+                ))}
+              </select>
+            </F>
+            <F
+              label="vLLM overrides (JSON)"
+              hint='e.g. {"temperature": 0.1, "max_tokens": 256}'
+            >
+              <textarea
+                value={vllmOverrides}
+                onChange={(e) => setVllmOverrides(e.target.value)}
+                rows={5}
+                className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs font-mono"
+              />
+            </F>
+            <F label="Response format">
+              <select
+                value={respFmt}
+                onChange={(e) => setRespFmt(e.target.value)}
+                className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
+              >
+                {RESPONSE_FORMATS.map((r) => (
+                  <option key={r.value} value={r.value}>
+                    {r.label}
+                  </option>
+                ))}
+              </select>
+            </F>
+            {respFmt === "json_schema" && (
+              <F label="JSON schema">
+                <textarea
+                  value={respSchema}
+                  onChange={(e) => setRespSchema(e.target.value)}
+                  rows={6}
+                  className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs font-mono"
+                />
+              </F>
+            )}
+          </div>
+        )}
+
+        {tab === "output" && (
+          <div className="space-y-3">
+            <F label="Output mode">
+              <select
+                value={outputMode}
+                onChange={(e) => setOutputMode(e.target.value)}
+                className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
+              >
+                {OUTPUT_MODES.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </F>
+            {outputMode === "webhook" && (
+              <>
+                <F label="Webhook URL">
+                  <input
+                    value={webhookUrl}
+                    onChange={(e) => setWebhookUrl(e.target.value)}
+                    placeholder="https://your-app.example.com/hooks/llm"
+                    className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm font-mono"
+                  />
+                </F>
+                <F
+                  label="Webhook headers (JSON)"
+                  hint='e.g. {"Authorization":"Bearer xxx"}'
+                >
+                  <textarea
+                    value={webhookHeaders}
+                    onChange={(e) => setWebhookHeaders(e.target.value)}
+                    rows={3}
+                    className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs font-mono"
+                  />
+                </F>
+              </>
+            )}
+            <F label="Timeout (seconds)">
+              <input
+                type="number"
+                value={timeout}
+                onChange={(e) => setTimeout_(parseInt(e.target.value) || 120)}
+                className="mt-1 w-40 rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
+              />
+            </F>
+          </div>
+        )}
+
+        <div className="mt-6 flex items-center justify-between">
           <label className="flex items-center gap-2 text-sm cursor-pointer">
             <input
               type="checkbox"
@@ -310,21 +508,21 @@ function Dialog({
             />
             Enabled
           </label>
-        </div>
-        <div className="mt-5 flex items-center justify-end gap-2">
-          <button
-            onClick={onClose}
-            className="rounded px-3 py-1.5 text-sm text-zinc-400 hover:text-zinc-200"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={save}
-            disabled={saving || !slug || !label || !modelSlug}
-            className="rounded bg-zinc-100 px-4 py-1.5 text-sm font-medium text-zinc-900 hover:bg-zinc-200 disabled:opacity-60"
-          >
-            {saving ? "Saving…" : "Save"}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onClose}
+              className="rounded px-3 py-1.5 text-sm text-zinc-400 hover:text-zinc-200"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={save}
+              disabled={saving || !slug || !label || !modelSlug}
+              className="rounded bg-zinc-100 px-4 py-1.5 text-sm font-medium text-zinc-900 hover:bg-zinc-200 disabled:opacity-60"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
         </div>
       </div>
     </div>

@@ -8,6 +8,7 @@ M2.5 scope: no auth yet (M5 adds API keys).
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any, AsyncGenerator
@@ -266,6 +267,31 @@ async def chat_completions(
     )
 
 
+def _apply_user_template(
+    messages: list[dict[str, Any]], template: str | None
+) -> list[dict[str, Any]]:
+    """Wrap the last user message content with `template` (supports {{input}}).
+    If no template, return messages unchanged.
+    """
+    if not template:
+        return messages
+    out = list(messages)
+    for i in range(len(out) - 1, -1, -1):
+        if out[i].get("role") == "user":
+            raw = out[i].get("content", "")
+            out[i] = {**out[i], "content": template.replace("{{input}}", str(raw))}
+            break
+    return out
+
+
+async def _post_webhook(
+    url: str, headers: dict[str, str] | None, payload: Any
+) -> int:
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.post(url, json=payload, headers=headers or {})
+        return r.status_code
+
+
 @router.post("/v1/pipelines/{slug}/chat")
 async def pipeline_chat(
     slug: str,
@@ -278,12 +304,7 @@ async def pipeline_chat(
             status.HTTP_403_FORBIDDEN,
             f"API key not authorized for pipeline '{slug}'",
         )
-    """Run a preset pipeline — model + system prompt baked in.
 
-    Clients send normal chat body (messages/stream/etc.); we inject the
-    pipeline's system prompt at the front of `messages` and force the
-    pipeline's model_slug.
-    """
     res = (
         sb.table("pipelines")
         .select("*")
@@ -303,21 +324,102 @@ async def pipeline_chat(
     except Exception as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid JSON: {e}")
 
-    # Force the model + inject system prompt.
-    body["model"] = pipe["model_slug"]
+    # ---------------- INPUT stage ----------------
     messages = body.get("messages") or []
+    messages = _apply_user_template(messages, pipe.get("user_template"))
     if pipe.get("system_prompt"):
-        # Prepend only if not already a system message.
         if not messages or messages[0].get("role") != "system":
             messages = [
                 {"role": "system", "content": pipe["system_prompt"]},
                 *messages,
             ]
-        body["messages"] = messages
+    body["messages"] = messages
 
-    return await _proxy_with_body(
+    # ---------------- PROCESS stage --------------
+    body["model"] = pipe["model_slug"]
+    for k, v in (pipe.get("vllm_overrides") or {}).items():
+        body[k] = v  # e.g. temperature, max_tokens
+
+    resp_fmt = pipe.get("response_format") or "text"
+    if resp_fmt == "json_object":
+        body["response_format"] = {"type": "json_object"}
+    elif resp_fmt == "json_schema":
+        if not pipe.get("response_schema"):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "pipeline set to json_schema but response_schema is empty",
+            )
+        body["response_format"] = {
+            "type": "json_schema",
+            "json_schema": pipe["response_schema"],
+        }
+
+    output_mode = pipe.get("output_mode") or "return"
+
+    # Webhook + json_only need the full response — force non-streaming.
+    if output_mode in ("webhook", "json_only"):
+        body["stream"] = False
+
+    # ---------------- OUTPUT stage ---------------
+    if output_mode == "return":
+        return await _proxy_with_body(
+            "/v1/chat/completions", body, request, sb,
+            api_key_id=principal.id, principal=principal,
+        )
+
+    # Non-streaming output modes: get the full response first.
+    response = await _proxy_with_body(
         "/v1/chat/completions", body, request, sb,
         api_key_id=principal.id, principal=principal,
+    )
+    # _proxy_with_body returns a starlette Response; pull JSON out.
+    if not isinstance(response, Response):
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, "Upstream returned a stream when a body was expected"
+        )
+    try:
+        data = json.loads(response.body.decode())
+    except Exception as e:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, f"Upstream response was not JSON: {e}"
+        ) from e
+
+    if output_mode == "json_only":
+        content = ((data.get("choices") or [{}])[0].get("message") or {}).get(
+            "content", ""
+        )
+        try:
+            parsed = json.loads(content)
+        except Exception as e:
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Model did not return valid JSON: {e}",
+            ) from e
+        return JSONResponse(parsed)
+
+    # output_mode == "webhook"
+    url = pipe.get("webhook_url")
+    if not url:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "pipeline output_mode=webhook but webhook_url is empty",
+        )
+    hdrs = pipe.get("webhook_headers") or {}
+    try:
+        webhook_status = await _post_webhook(url, hdrs, data)
+    except Exception as e:
+        logger.warning("webhook POST to %s failed: %s", url, e)
+        return JSONResponse(
+            {"ok": False, "webhook_error": str(e), "response": data},
+            status_code=502,
+        )
+    return JSONResponse(
+        {
+            "ok": True,
+            "webhook_url": url,
+            "webhook_status": webhook_status,
+            "usage": data.get("usage"),
+        }
     )
 
 
