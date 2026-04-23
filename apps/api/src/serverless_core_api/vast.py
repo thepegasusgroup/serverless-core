@@ -16,10 +16,15 @@ def build_offer_query(
     verified: bool | None = None,
     rentable: bool = True,
 ) -> dict[str, Any]:
+    # `limit` + `order` go INSIDE the q dict — they're part of vast's query DSL.
+    # Default server-side page cap is ~64; bumping it returns the full slice
+    # so our region/country filters see every candidate before we truncate.
     q: dict[str, Any] = {
         "num_gpus": {"eq": num_gpus},
         "reliability2": {"gte": min_reliability},
         "rentable": {"eq": rentable},
+        "limit": 1000,
+        "order": [["dph_total", "asc"]],
     }
     if verified is not None:
         q["verified"] = {"eq": verified}
