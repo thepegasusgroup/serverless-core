@@ -626,7 +626,11 @@ class DatasetCreate(BaseModel):
     model: str = "claude-opus-4-7"
     system: str = ""
     prompts: list[str]
-    max_tokens: int = 4096
+    # 8192 is a safer default than 4096 for code/long-JSON generation. We
+    # observed 35% truncation rate at 4K on Paper plugin outputs; at 8K
+    # it'd be <5%. For very long outputs (70B-spec code, multi-file projects)
+    # bump to 16384 on the client side.
+    max_tokens: int = 8192
     cache_system: bool = True
     submit_now: bool = True  # if False, saves as draft
 

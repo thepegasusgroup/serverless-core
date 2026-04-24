@@ -324,7 +324,10 @@ function CreateDatasetDialog({
   const [model, setModel] = useState(MODELS[0].id);
   const [system, setSystem] = useState("");
   const [promptsText, setPromptsText] = useState("");
-  const [maxTokens, setMaxTokens] = useState(4096);
+  // 8192 is a safer default than 4096 for code/long-JSON generation — we've
+  // seen 35%+ of rows truncate at 4K on Paper plugin outputs. Users can raise
+  // to 16384 for very complex outputs.
+  const [maxTokens, setMaxTokens] = useState(8192);
   const [cacheSystem, setCacheSystem] = useState(true);
   const [submitNow, setSubmitNow] = useState(true);
   const [saving, setSaving] = useState(false);
