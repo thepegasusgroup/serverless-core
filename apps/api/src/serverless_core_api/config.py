@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     # a read-scoped token makes vLLM's model weight download 3-5× faster.
     hf_token: str | None = None
 
+    # Optional Anthropic API key. Enables /admin/datasets to submit synthetic
+    # data generation jobs via the Claude Message Batches API. When unset,
+    # dataset endpoints return 503 "not configured".
+    anthropic_api_key: str | None = None
+
     public_api_url: str = "http://localhost:8000"
     cors_allowed_origins: str = "http://localhost:3000"
 

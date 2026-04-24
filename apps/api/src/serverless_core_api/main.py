@@ -6,8 +6,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client
 
+from serverless_core_api.anthropic_client import AnthropicBatchClient
 from serverless_core_api.config import get_settings
 from serverless_core_api.routers import admin, health, internal, proxy
+from serverless_core_api.services.dataset_poller import run_forever as dataset_run_forever
 from serverless_core_api.services.idle_pauser import run_forever as idle_run_forever
 from serverless_core_api.services.replicator import run_forever as replicator_run_forever
 from serverless_core_api.services.status_poller import poll_forever
@@ -23,6 +25,18 @@ async def lifespan(app: FastAPI):
     app.state.vast = VastClient(settings.vast_api_key)
     app.state.sb_service = create_client(
         settings.supabase_url, settings.supabase_service_role_key
+    )
+
+    # Optional: Anthropic Batches API client for /admin/datasets.
+    # Unset when ANTHROPIC_API_KEY is missing — dataset endpoints 503 gracefully.
+    app.state.anthropic = (
+        AnthropicBatchClient(settings.anthropic_api_key)
+        if settings.anthropic_api_key
+        else None
+    )
+    logger.info(
+        "Anthropic integration: %s",
+        "enabled" if app.state.anthropic else "disabled (ANTHROPIC_API_KEY unset)",
     )
 
     try:
@@ -41,11 +55,15 @@ async def lifespan(app: FastAPI):
     replicator_task = asyncio.create_task(
         replicator_run_forever(app.state.vast, app.state.sb_service, settings)
     )
+    # No-op when anthropic is None — safe to always run.
+    dataset_task = asyncio.create_task(
+        dataset_run_forever(app.state.sb_service, app.state.anthropic)
+    )
 
     try:
         yield
     finally:
-        for t in (poller_task, idle_task, replicator_task):
+        for t in (poller_task, idle_task, replicator_task, dataset_task):
             t.cancel()
             try:
                 await t

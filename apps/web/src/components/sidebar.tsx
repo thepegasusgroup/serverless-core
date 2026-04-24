@@ -13,6 +13,7 @@ import {
   Key,
   Terminal,
   Workflow,
+  FileJson,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 
@@ -32,6 +33,7 @@ const groups: {
       { href: "/instances/new", label: "Rent", icon: Plus },
       { href: "/run", label: "Run", icon: Terminal },
       { href: "/pipelines", label: "Pipelines", icon: Workflow },
+      { href: "/datasets", label: "Datasets", icon: FileJson },
     ],
   },
   {

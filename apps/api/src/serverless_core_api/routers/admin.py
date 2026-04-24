@@ -1,11 +1,17 @@
+import csv
 import hashlib
+import io
+import json
+import re
 import secrets as _secrets
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from supabase import Client
 
+from serverless_core_api.anthropic_client import SUPPORTED_MODELS
 from serverless_core_api.config import Settings, get_settings
 from serverless_core_api.deps import get_service_client, get_staff_user
 from serverless_core_api.models.offer import Offer
@@ -594,3 +600,324 @@ async def instance_logs(
             status.HTTP_502_BAD_GATEWAY, f"vast.ai logs failed: {e}"
         ) from e
     return {"logs": text}
+
+
+# -----------------------------------------------------------------------------
+# Datasets — Claude Batch API–backed synthetic data generation
+# -----------------------------------------------------------------------------
+
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+
+
+def _require_anthropic(request: Request):
+    """Ensure the Anthropic client was wired at startup. Returns the client."""
+    ac = getattr(request.app.state, "anthropic", None)
+    if ac is None:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Anthropic integration not configured. Set ANTHROPIC_API_KEY as a Fly secret.",
+        )
+    return ac
+
+
+class DatasetCreate(BaseModel):
+    slug: str
+    label: str
+    model: str = "claude-opus-4-7"
+    system: str = ""
+    prompts: list[str]
+    max_tokens: int = 4096
+    cache_system: bool = True
+    submit_now: bool = True  # if False, saves as draft
+
+
+class DatasetPatch(BaseModel):
+    label: str | None = None
+
+
+@router.get("/datasets")
+def list_datasets(sb: Client = Depends(get_service_client)) -> list[dict]:
+    return (
+        sb.table("datasets")
+        .select(
+            "id,slug,label,status,provider,progress_completed,progress_total,"
+            "progress_errored,usage,error,submitted_at,completed_at,created_at"
+        )
+        .order("created_at", desc=True)
+        .execute()
+        .data
+        or []
+    )
+
+
+@router.post("/datasets", status_code=status.HTTP_201_CREATED)
+async def create_dataset(
+    body: DatasetCreate,
+    request: Request,
+    sb: Client = Depends(get_service_client),
+) -> dict:
+    if not _SLUG_RE.match(body.slug):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Slug must be lowercase alphanumeric with dashes (1-63 chars)",
+        )
+    if body.model not in SUPPORTED_MODELS:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Model must be one of: {', '.join(SUPPORTED_MODELS)}",
+        )
+    if not body.prompts:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "prompts cannot be empty")
+    if len(body.prompts) > 5000:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Up to 5000 prompts per dataset in this build",
+        )
+
+    row = {
+        "slug": body.slug,
+        "label": body.label,
+        "provider": "claude_batch",
+        "status": "draft",
+        "progress_total": len(body.prompts),
+        "config": {
+            "model": body.model,
+            "system": body.system,
+            "prompts": body.prompts,
+            "max_tokens": body.max_tokens,
+            "cache_system": body.cache_system,
+        },
+    }
+    try:
+        res = sb.table("datasets").insert(row).execute()
+    except Exception as e:  # noqa: BLE001 (likely unique-violation on slug)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    if not res.data:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "insert returned nothing"
+        )
+    created = res.data[0]
+
+    if body.submit_now:
+        created = await _submit_dataset(created, request, sb)
+    return created
+
+
+async def _submit_dataset(
+    dataset: dict, request: Request, sb: Client
+) -> dict:
+    """Submit a draft dataset to Anthropic. Idempotent on external_batch_id."""
+    if dataset["status"] not in ("draft",):
+        return dataset  # already submitted
+    ac = _require_anthropic(request)
+    cfg = dataset["config"]
+
+    # Flip to submitting so a concurrent caller doesn't double-submit.
+    sb.table("datasets").update({"status": "submitting"}).eq(
+        "id", dataset["id"]
+    ).execute()
+    try:
+        batch = await ac.submit_batch(
+            model=cfg["model"],
+            system_prompt=cfg.get("system", ""),
+            user_prompts=cfg["prompts"],
+            max_tokens=cfg.get("max_tokens", 4096),
+            cache_system=cfg.get("cache_system", True),
+        )
+    except Exception as e:  # noqa: BLE001
+        sb.table("datasets").update(
+            {"status": "failed", "error": f"submit failed: {e}"}
+        ).eq("id", dataset["id"]).execute()
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, f"Anthropic submit failed: {e}"
+        ) from e
+
+    now = datetime.now(timezone.utc).isoformat()
+    upd = (
+        sb.table("datasets")
+        .update(
+            {
+                "status": "running",
+                "external_batch_id": batch["id"],
+                "submitted_at": now,
+            }
+        )
+        .eq("id", dataset["id"])
+        .execute()
+    )
+    return upd.data[0] if upd.data else dataset
+
+
+@router.post("/datasets/{dataset_id}/submit")
+async def submit_dataset(
+    dataset_id: str,
+    request: Request,
+    sb: Client = Depends(get_service_client),
+) -> dict:
+    res = sb.table("datasets").select("*").eq("id", dataset_id).limit(1).execute()
+    if not res.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Dataset not found")
+    return await _submit_dataset(res.data[0], request, sb)
+
+
+@router.post("/datasets/{dataset_id}/cancel")
+async def cancel_dataset(
+    dataset_id: str,
+    request: Request,
+    sb: Client = Depends(get_service_client),
+) -> dict:
+    res = sb.table("datasets").select("*").eq("id", dataset_id).limit(1).execute()
+    if not res.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Dataset not found")
+    d = res.data[0]
+    if d["status"] not in ("submitting", "running"):
+        return {"ok": True, "already": d["status"]}
+    ac = _require_anthropic(request)
+    if d.get("external_batch_id"):
+        try:
+            await ac.cancel_batch(d["external_batch_id"])
+        except Exception as e:  # noqa: BLE001
+            # Cancel is idempotent on our side even if Anthropic errors —
+            # the poller will eventually mark it terminal.
+            pass  # noqa: S110
+    sb.table("datasets").update(
+        {"status": "canceled", "completed_at": datetime.now(timezone.utc).isoformat()}
+    ).eq("id", dataset_id).execute()
+    return {"ok": True}
+
+
+@router.get("/datasets/{dataset_id}")
+def get_dataset(
+    dataset_id: str, sb: Client = Depends(get_service_client)
+) -> dict:
+    res = sb.table("datasets").select("*").eq("id", dataset_id).limit(1).execute()
+    if not res.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Dataset not found")
+    return res.data[0]
+
+
+@router.get("/datasets/{dataset_id}/rows")
+def list_dataset_rows(
+    dataset_id: str,
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    sb: Client = Depends(get_service_client),
+) -> dict:
+    total = (
+        sb.table("dataset_rows")
+        .select("id", count="exact")
+        .eq("dataset_id", dataset_id)
+        .execute()
+        .count
+        or 0
+    )
+    rows = (
+        sb.table("dataset_rows")
+        .select("id,row_index,input,output,usage,error,created_at")
+        .eq("dataset_id", dataset_id)
+        .order("row_index")
+        .range(offset, offset + limit - 1)
+        .execute()
+        .data
+        or []
+    )
+    return {"rows": rows, "total": total, "limit": limit, "offset": offset}
+
+
+@router.delete("/datasets/{dataset_id}")
+def delete_dataset(
+    dataset_id: str, sb: Client = Depends(get_service_client)
+) -> dict:
+    sb.table("datasets").delete().eq("id", dataset_id).execute()
+    return {"ok": True}
+
+
+@router.get("/datasets/{dataset_id}/export")
+def export_dataset(
+    dataset_id: str,
+    fmt: str = Query(default="jsonl", pattern="^(jsonl|csv)$"),
+    sb: Client = Depends(get_service_client),
+):
+    """Stream the full dataset as JSONL (OpenAI-compat messages format) or CSV.
+
+    JSONL emits {"messages": [{role:system,...}, {role:user,...}, {role:assistant,...}]}
+    per line — same shape the user showed as reference, ready for fine-tuning.
+    """
+    ds_res = sb.table("datasets").select("*").eq("id", dataset_id).limit(1).execute()
+    if not ds_res.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Dataset not found")
+    ds = ds_res.data[0]
+    slug = ds["slug"]
+
+    def _iter_rows():
+        # Paginated fetch — 500 at a time to avoid huge payloads.
+        step = 500
+        start = 0
+        while True:
+            r = (
+                sb.table("dataset_rows")
+                .select("row_index,input,output,error")
+                .eq("dataset_id", dataset_id)
+                .order("row_index")
+                .range(start, start + step - 1)
+                .execute()
+            )
+            chunk = r.data or []
+            if not chunk:
+                return
+            for row in chunk:
+                yield row
+            if len(chunk) < step:
+                return
+            start += step
+
+    if fmt == "jsonl":
+        def _gen():
+            for row in _iter_rows():
+                if row.get("error") or not row.get("output"):
+                    continue  # skip errored rows in export
+                inp = row.get("input") or {}
+                messages = []
+                if inp.get("system"):
+                    messages.append({"role": "system", "content": inp["system"]})
+                if inp.get("user"):
+                    messages.append({"role": "user", "content": inp["user"]})
+                messages.append({"role": "assistant", "content": row["output"]})
+                yield json.dumps({"messages": messages}, ensure_ascii=False) + "\n"
+
+        return StreamingResponse(
+            _gen(),
+            media_type="application/x-ndjson",
+            headers={
+                "Content-Disposition": f'attachment; filename="{slug}.jsonl"'
+            },
+        )
+
+    # CSV: row_index, system, user, assistant, error
+    def _csv_gen():
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["row_index", "system", "user", "assistant", "error"])
+        yield buf.getvalue()
+        buf.seek(0)
+        buf.truncate(0)
+        for row in _iter_rows():
+            inp = row.get("input") or {}
+            writer.writerow(
+                [
+                    row.get("row_index"),
+                    inp.get("system", ""),
+                    inp.get("user", ""),
+                    row.get("output", "") or "",
+                    row.get("error", "") or "",
+                ]
+            )
+            yield buf.getvalue()
+            buf.seek(0)
+            buf.truncate(0)
+
+    return StreamingResponse(
+        _csv_gen(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{slug}.csv"'},
+    )
