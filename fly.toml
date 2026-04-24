@@ -7,9 +7,15 @@ dockerfile = "apps/api/Dockerfile"
 [http_service]
 internal_port = 8000
 force_https = true
+# Keep at least one machine always running — the replicator, status poller,
+# and idle pauser are background tasks that MUST run continuously to keep
+# the vast fleet healthy. If every machine autostops (as with
+# min_machines_running=0) the fleet drifts: evictions aren't detected, idle
+# instances keep billing, replicas aren't maintained. ~$5/mo for the
+# always-on shared-cpu-1x machine is the cost of making scale-to-zero work.
 auto_stop_machines = "stop"
 auto_start_machines = true
-min_machines_running = 0
+min_machines_running = 1
 
 [[http_service.checks]]
 grace_period = "30s"
