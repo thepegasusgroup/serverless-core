@@ -2,15 +2,17 @@
 #
 # Layers the HuggingFace weights for a specific model INTO the image so a
 # rented vast.ai host pulls once from GHCR and has everything it needs —
-# no runtime HF download, no HF rate-limit risk, ~2-3 min cold boots
-# instead of ~10 min.
+# no runtime HF download, no HF rate-limit risk.
 #
-# CRITICAL: weights are split across multiple RUN steps so that Docker
-# produces several 2-4 GB layers instead of one giant 10+ GB layer. Docker
-# pulls up to 3 layers in parallel, but a SINGLE big layer is one
-# sequential TCP stream — GHCR throttles individual streams to
-# ~200-500 Mbps, so a single 11 GB layer takes 3-15 min regardless of
-# host bandwidth. Splitting lets fast hosts actually pull in parallel.
+# CRITICAL — layer granularity: each individual safetensor shard is its own
+# RUN step, producing a separate Docker layer. This matters because:
+#   1. Docker pulls up to 3 layers in parallel — but a single large layer
+#      is ONE sequential TCP stream that can't be parallelized.
+#   2. GHCR's Fastly CDN applies per-stream throttling and connection
+#      timeouts. A single >4 GB layer risks getting dropped mid-pull and
+#      Docker retries the whole layer, leading to the stuck "0% CPU while
+#      loading" pattern we saw on 4 hosts.
+# Target: no individual layer > ~4 GB.
 #
 # Build args:
 #   BASE_IMAGE   — the sha-tagged sc-vllm-agent base built by build-agent.yml
@@ -27,14 +29,13 @@ ARG HF_REVISION=main
 # Qwen work without it. Pass via --secret in build-push-action for security.
 ARG HF_TOKEN=""
 
-# hf_transfer saturates multi-Gbps pipes. The base vllm-openai image already
-# has it installed as a dependency of huggingface_hub[hf_transfer].
+# hf_transfer saturates multi-Gbps pipes during the build. The base
+# vllm-openai image already has it installed.
 ENV HF_HUB_ENABLE_HF_TRANSFER=1
 
 RUN test -n "$HF_REPO" || (echo "ERROR: HF_REPO build-arg is required" && exit 1)
 
-# ---- Layer 1: small config/tokenizer files (~30 MB) -----------------------
-# These almost never change and are trivial to pull.
+# ---- Layer 1: config/tokenizer (~30 MB) -----------------------------------
 RUN HF_REPO="$HF_REPO" HF_REVISION="$HF_REVISION" HF_TOKEN="$HF_TOKEN" \
     python3 - <<'PY'
 import os
@@ -52,103 +53,111 @@ snapshot_download(
 )
 PY
 
-# ---- Layer 2: shards 1-3 --------------------------------------------------
-# Downloads in parallel with layer 3 + 4 on the host.
+# ---- One layer per safetensor shard --------------------------------------
+# Covers up to 16 shards (enough for most models up to 70B quantized).
+# Empty layers are cheap (~100 bytes). huggingface_hub's snapshot_download
+# is idempotent — already-cached files are skipped — so iterating through
+# all potential shards adds no wasted bandwidth during build.
+
 RUN HF_REPO="$HF_REPO" HF_REVISION="$HF_REVISION" HF_TOKEN="$HF_TOKEN" \
     python3 - <<'PY'
 import os
 from huggingface_hub import snapshot_download
-snapshot_download(
-    repo_id=os.environ["HF_REPO"],
-    revision=os.environ["HF_REVISION"],
-    cache_dir="/root/.cache/huggingface/hub",
-    token=os.environ.get("HF_TOKEN") or None,
-    allow_patterns=[
-        "*-00001-of-*.safetensors",
-        "*-00002-of-*.safetensors",
-        "*-00003-of-*.safetensors",
-    ],
-)
+snapshot_download(os.environ["HF_REPO"], revision=os.environ["HF_REVISION"],
+  cache_dir="/root/.cache/huggingface/hub", token=os.environ.get("HF_TOKEN") or None,
+  allow_patterns=["*-00001-of-*.safetensors"])
 PY
 
-# ---- Layer 3: shards 4-6 --------------------------------------------------
 RUN HF_REPO="$HF_REPO" HF_REVISION="$HF_REVISION" HF_TOKEN="$HF_TOKEN" \
     python3 - <<'PY'
 import os
 from huggingface_hub import snapshot_download
-snapshot_download(
-    repo_id=os.environ["HF_REPO"],
-    revision=os.environ["HF_REVISION"],
-    cache_dir="/root/.cache/huggingface/hub",
-    token=os.environ.get("HF_TOKEN") or None,
-    allow_patterns=[
-        "*-00004-of-*.safetensors",
-        "*-00005-of-*.safetensors",
-        "*-00006-of-*.safetensors",
-    ],
-)
+snapshot_download(os.environ["HF_REPO"], revision=os.environ["HF_REVISION"],
+  cache_dir="/root/.cache/huggingface/hub", token=os.environ.get("HF_TOKEN") or None,
+  allow_patterns=["*-00002-of-*.safetensors"])
 PY
 
-# ---- Layer 4: shards 7-10 (covers bigger 8B/13B models) -------------------
 RUN HF_REPO="$HF_REPO" HF_REVISION="$HF_REVISION" HF_TOKEN="$HF_TOKEN" \
     python3 - <<'PY'
 import os
 from huggingface_hub import snapshot_download
-snapshot_download(
-    repo_id=os.environ["HF_REPO"],
-    revision=os.environ["HF_REVISION"],
-    cache_dir="/root/.cache/huggingface/hub",
-    token=os.environ.get("HF_TOKEN") or None,
-    allow_patterns=[
-        "*-00007-of-*.safetensors",
-        "*-00008-of-*.safetensors",
-        "*-00009-of-*.safetensors",
-        "*-00010-of-*.safetensors",
-    ],
-)
+snapshot_download(os.environ["HF_REPO"], revision=os.environ["HF_REVISION"],
+  cache_dir="/root/.cache/huggingface/hub", token=os.environ.get("HF_TOKEN") or None,
+  allow_patterns=["*-00003-of-*.safetensors"])
 PY
 
-# ---- Layer 5: shards 11-20 (for 30B+ quantized models) --------------------
 RUN HF_REPO="$HF_REPO" HF_REVISION="$HF_REVISION" HF_TOKEN="$HF_TOKEN" \
     python3 - <<'PY'
 import os
 from huggingface_hub import snapshot_download
-snapshot_download(
-    repo_id=os.environ["HF_REPO"],
-    revision=os.environ["HF_REVISION"],
-    cache_dir="/root/.cache/huggingface/hub",
-    token=os.environ.get("HF_TOKEN") or None,
-    allow_patterns=[
-        "*-0001[1-9]-of-*.safetensors",
-        "*-00020-of-*.safetensors",
-    ],
-)
+snapshot_download(os.environ["HF_REPO"], revision=os.environ["HF_REVISION"],
+  cache_dir="/root/.cache/huggingface/hub", token=os.environ.get("HF_TOKEN") or None,
+  allow_patterns=["*-00004-of-*.safetensors"])
 PY
 
-# ---- Layer 6: catch-all for any remaining files ---------------------------
-# Models that use single-file safetensors, model.bin variants, or unusual
-# shard naming conventions get picked up here. Excludes the variants vLLM
-# doesn't use (saves ~30-50% on some repos).
 RUN HF_REPO="$HF_REPO" HF_REVISION="$HF_REVISION" HF_TOKEN="$HF_TOKEN" \
     python3 - <<'PY'
 import os
 from huggingface_hub import snapshot_download
-snapshot_download(
-    repo_id=os.environ["HF_REPO"],
-    revision=os.environ["HF_REVISION"],
-    cache_dir="/root/.cache/huggingface/hub",
-    token=os.environ.get("HF_TOKEN") or None,
-    ignore_patterns=["*.gguf", "*.ot", "*.msgpack", "*.h5", "original/*"],
-)
+snapshot_download(os.environ["HF_REPO"], revision=os.environ["HF_REVISION"],
+  cache_dir="/root/.cache/huggingface/hub", token=os.environ.get("HF_TOKEN") or None,
+  allow_patterns=["*-00005-of-*.safetensors"])
 PY
 
-# Tell vLLM + transformers to never hit the HF API at runtime. Without this
-# the boot stalls for 5-10 s when the host has firewalled outbound HF traffic.
+RUN HF_REPO="$HF_REPO" HF_REVISION="$HF_REVISION" HF_TOKEN="$HF_TOKEN" \
+    python3 - <<'PY'
+import os
+from huggingface_hub import snapshot_download
+snapshot_download(os.environ["HF_REPO"], revision=os.environ["HF_REVISION"],
+  cache_dir="/root/.cache/huggingface/hub", token=os.environ.get("HF_TOKEN") or None,
+  allow_patterns=["*-00006-of-*.safetensors"])
+PY
+
+RUN HF_REPO="$HF_REPO" HF_REVISION="$HF_REVISION" HF_TOKEN="$HF_TOKEN" \
+    python3 - <<'PY'
+import os
+from huggingface_hub import snapshot_download
+snapshot_download(os.environ["HF_REPO"], revision=os.environ["HF_REVISION"],
+  cache_dir="/root/.cache/huggingface/hub", token=os.environ.get("HF_TOKEN") or None,
+  allow_patterns=["*-00007-of-*.safetensors"])
+PY
+
+RUN HF_REPO="$HF_REPO" HF_REVISION="$HF_REVISION" HF_TOKEN="$HF_TOKEN" \
+    python3 - <<'PY'
+import os
+from huggingface_hub import snapshot_download
+snapshot_download(os.environ["HF_REPO"], revision=os.environ["HF_REVISION"],
+  cache_dir="/root/.cache/huggingface/hub", token=os.environ.get("HF_TOKEN") or None,
+  allow_patterns=["*-00008-of-*.safetensors"])
+PY
+
+RUN HF_REPO="$HF_REPO" HF_REVISION="$HF_REVISION" HF_TOKEN="$HF_TOKEN" \
+    python3 - <<'PY'
+import os
+from huggingface_hub import snapshot_download
+snapshot_download(os.environ["HF_REPO"], revision=os.environ["HF_REVISION"],
+  cache_dir="/root/.cache/huggingface/hub", token=os.environ.get("HF_TOKEN") or None,
+  allow_patterns=[f"*-{i:05d}-of-*.safetensors" for i in range(9, 17)])
+PY
+
+# ---- Catch-all for any remaining model files -----------------------------
+# Picks up non-standard names (pytorch_model.bin, consolidated.safetensors,
+# single-file safetensors without shard suffix, etc.) that slipped past the
+# per-shard patterns above. Excludes formats vLLM never uses.
+RUN HF_REPO="$HF_REPO" HF_REVISION="$HF_REVISION" HF_TOKEN="$HF_TOKEN" \
+    python3 - <<'PY'
+import os
+from huggingface_hub import snapshot_download
+snapshot_download(os.environ["HF_REPO"], revision=os.environ["HF_REVISION"],
+  cache_dir="/root/.cache/huggingface/hub", token=os.environ.get("HF_TOKEN") or None,
+  ignore_patterns=["*.gguf", "*.ot", "*.msgpack", "*.h5", "original/*"])
+PY
+
+# Tell vLLM + transformers to never hit the HF API at runtime.
 ENV HF_HUB_OFFLINE=1
 ENV TRANSFORMERS_OFFLINE=1
 
-# Stamp the baked-in model identity into the image so `docker inspect` and
-# our debug panel can see it without parsing the tag.
+# Audit trail inside the image.
 ENV SC_BAKED_HF_REPO=${HF_REPO}
 ENV SC_BAKED_HF_REVISION=${HF_REVISION}
 LABEL sc.baked.hf_repo=${HF_REPO}
