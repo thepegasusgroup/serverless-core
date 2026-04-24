@@ -1,0 +1,126 @@
+name: Build baked-weights model images
+
+# Builds one Docker image per matrix entry, each with a specific model's
+# HuggingFace weights baked in. Publishes to:
+#   ghcr.io/<owner>/sc-vllm-agent-<slug>:<git-sha>
+#
+# After a run, update the corresponding row in public.models:
+#   docker_image = 'ghcr.io/<owner>/sc-vllm-agent-<slug>:<git-sha>'
+# The replicator's next rental will pull from GHCR only (no HF download).
+#
+# To add a model: append to the matrix below. To disable: delete this file
+# or empty the matrix.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docker/vllm-agent/Dockerfile.baked'
+      - '.github/workflows/build-model-images.yml'
+  workflow_dispatch:
+    inputs:
+      slug:
+        description: "Only build this slug (blank = all matrix entries)"
+        required: false
+        default: ""
+
+env:
+  REGISTRY: ghcr.io
+  # Base image published by build-agent.yml. Pinned to SHA — never :latest —
+  # so rebuilding a baked image doesn't accidentally pick up a different
+  # vLLM base than the one we tested against.
+  BASE_IMAGE: ghcr.io/thepegasusgroup/sc-vllm-agent:sha-c6a89af22c6c22ea07eb79ceedaa1f34fdb18a55
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        model:
+          - slug: qwen25-7b
+            hf_repo: Qwen/Qwen2.5-7B-Instruct
+            hf_revision: main
+          # Add more here, e.g.:
+          # - slug: llama-3.1-8b
+          #   hf_repo: meta-llama/Llama-3.1-8B-Instruct
+          #   hf_revision: main   # gated — set HF_TOKEN repo secret
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Filter when the workflow is hand-triggered with a slug.
+      - name: Skip if slug filter does not match
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          github.event.inputs.slug != '' &&
+          github.event.inputs.slug != matrix.model.slug
+        run: |
+          echo "Skipping ${{ matrix.model.slug }} (filter=${{ github.event.inputs.slug }})"
+          echo "SKIP=1" >> $GITHUB_ENV
+
+      # Ubuntu-latest ships with ~14 GB of free disk. A 7B model + HF cache
+      # + buildx layer store can hit that ceiling, so free up ~30 GB first.
+      - name: Free disk space
+        if: env.SKIP != '1'
+        uses: jlumbroso/free-disk-space@main
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+
+      - name: Set up Docker Buildx
+        if: env.SKIP != '1'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: env.SKIP != '1'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Optional HF_TOKEN — only required for gated repos (Llama, Gemma, etc).
+      # Store as a repo secret named HF_TOKEN. Unset for ungated repos.
+      - name: Make HF_TOKEN secret file
+        if: env.SKIP != '1'
+        run: |
+          mkdir -p /tmp/secrets
+          printf '%s' '${{ secrets.HF_TOKEN }}' > /tmp/secrets/hf_token
+
+      - name: Build and push
+        if: env.SKIP != '1'
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/vllm-agent
+          file: docker/vllm-agent/Dockerfile.baked
+          push: true
+          provenance: false          # skip attestation blob (saves ~80MB)
+          build-args: |
+            BASE_IMAGE=${{ env.BASE_IMAGE }}
+            HF_REPO=${{ matrix.model.hf_repo }}
+            HF_REVISION=${{ matrix.model.hf_revision }}
+          secret-files: |
+            hf_token=/tmp/secrets/hf_token
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/sc-vllm-agent-${{ matrix.model.slug }}:sha-${{ github.sha }}
+          # Per-slug cache scope so parallel builds don't trash each other.
+          cache-from: type=gha,scope=baked-${{ matrix.model.slug }}
+          cache-to: type=gha,scope=baked-${{ matrix.model.slug }},mode=max
+
+      - name: Write summary
+        if: env.SKIP != '1'
+        run: |
+          echo "### Baked image pushed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "${{ env.REGISTRY }}/${{ github.repository_owner }}/sc-vllm-agent-${{ matrix.model.slug }}:sha-${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "To use, update the \`docker_image\` column on the \`${{ matrix.model.slug }}\` model row." >> $GITHUB_STEP_SUMMARY

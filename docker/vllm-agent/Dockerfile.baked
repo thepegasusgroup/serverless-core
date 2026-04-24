@@ -1,0 +1,56 @@
+# Baked-weights variant of sc-vllm-agent.
+#
+# Layers the HuggingFace weights for a specific model INTO the image so a
+# rented vast.ai host pulls once from GHCR and has everything it needs —
+# no runtime HF download, no HF rate-limit risk, ~2-3 min cold boots
+# instead of ~10 min.
+#
+# Build args:
+#   BASE_IMAGE   — the sha-tagged sc-vllm-agent base built by build-agent.yml
+#   HF_REPO      — e.g., Qwen/Qwen2.5-7B-Instruct
+#   HF_REVISION  — commit SHA or tag (defaults to "main")
+#
+# One image per model; tag pattern is sc-vllm-agent-<slug>:<git-sha>.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG HF_REPO
+ARG HF_REVISION=main
+# HF_TOKEN is only needed for gated repos (Llama, etc). Ungated repos like
+# Qwen work without it. Pass via --secret in build-push-action for security.
+ARG HF_TOKEN=""
+
+# hf_transfer saturates multi-Gbps pipes. The base vllm-openai image already
+# has it installed as a dependency of huggingface_hub[hf_transfer].
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+
+# Download weights into vLLM's default cache path. vLLM picks them up at
+# runtime with zero code changes — it checks this path before hitting HF.
+RUN test -n "$HF_REPO" || (echo "ERROR: HF_REPO build-arg is required" && exit 1)
+
+RUN HF_REPO="$HF_REPO" HF_REVISION="$HF_REVISION" HF_TOKEN="$HF_TOKEN" \
+    python3 - <<'PY'
+import os
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id=os.environ["HF_REPO"],
+    revision=os.environ["HF_REVISION"],
+    cache_dir="/root/.cache/huggingface/hub",
+    token=os.environ.get("HF_TOKEN") or None,
+    # Skip the .gguf / .ot / .msgpack variants — vLLM only wants the
+    # safetensors shards + config. Saves ~30-50% image size on some repos.
+    ignore_patterns=["*.gguf", "*.ot", "*.msgpack", "*.h5", "original/*"],
+)
+PY
+
+# Tell vLLM + transformers to never hit the HF API at runtime. Without this
+# the boot stalls for 5-10 s when the host has firewalled outbound HF traffic.
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_OFFLINE=1
+
+# Stamp the baked-in model identity into the image so `docker inspect` and
+# our debug panel can see it without parsing the tag.
+ENV SC_BAKED_HF_REPO=${HF_REPO}
+ENV SC_BAKED_HF_REVISION=${HF_REVISION}
+LABEL sc.baked.hf_repo=${HF_REPO}
+LABEL sc.baked.hf_revision=${HF_REVISION}
