@@ -196,19 +196,39 @@ export default function RunPage() {
         throw new Error(`${res.status}: ${text}`);
       }
 
-      if (!streaming) {
+      // Branch on the server's actual response type, not what the client
+      // asked for. Pipelines always return application/json (transforms
+      // need the full output before they can run), so `stream:true` on a
+      // pipeline request is effectively ignored server-side. The old
+      // code read the SSE branch for those, got 0 chunks, and rendered
+      // empty output.
+      const contentType = res.headers.get("content-type") ?? "";
+      const isSSE = contentType.includes("event-stream");
+
+      if (!isSSE) {
         const data = await res.json();
         ttfbMs = Math.round(performance.now() - t0);
-        const content = data.choices?.[0]?.message?.content ?? "";
+        let content: string;
+        let tokens: number | undefined;
+        if (data?.choices?.[0]?.message?.content !== undefined) {
+          // OpenAI-shaped body: model (stream=false) or pipeline (return mode).
+          content = data.choices[0].message.content;
+          tokens = data.usage?.completion_tokens;
+        } else {
+          // Raw body — pipeline with output_mode=json_only returns the parsed
+          // object directly. Render as pretty JSON so it's legible.
+          content = JSON.stringify(data, null, 2);
+          tokens = undefined;
+        }
         setResponse(content);
         setMetrics({
           ttfbMs,
           totalMs: ttfbMs,
-          tokens: data.usage?.completion_tokens,
+          tokens,
         });
         logEvt(
           "info",
-          `Complete · ${ttfbMs}ms · ${data.usage?.completion_tokens ?? "?"} tokens`,
+          `Complete · ${ttfbMs}ms · ${tokens ?? "?"} tokens`,
         );
       } else {
         const reader = res.body!.getReader();
