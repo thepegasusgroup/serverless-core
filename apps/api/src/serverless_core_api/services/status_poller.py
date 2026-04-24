@@ -82,6 +82,17 @@ async def _poll_one(
         logger.debug("show_instance(%s) failed: %s", cid, e)
         return
 
+    # Eviction / manual delete on vast's side commonly surfaces as HTTP 200
+    # with {"instances": null} rather than a 404. Treat that as terminal so
+    # the replicator can re-rent — otherwise interruptibles silently drop
+    # out of the fleet and nothing self-heals.
+    if isinstance(info, dict) and "instances" in info and info["instances"] is None:
+        _mark_destroyed(
+            sb, row["id"],
+            "vast.ai returned no instance (contract gone — likely evicted)",
+        )
+        return
+
     i = info.get("instances", info) if isinstance(info, dict) else {}
     if not isinstance(i, dict):
         return
