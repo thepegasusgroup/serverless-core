@@ -9,6 +9,7 @@ from supabase import create_client
 from serverless_core_api.config import get_settings
 from serverless_core_api.routers import admin, health, internal, proxy
 from serverless_core_api.services.idle_pauser import run_forever as idle_run_forever
+from serverless_core_api.services.replicator import run_forever as replicator_run_forever
 from serverless_core_api.services.status_poller import poll_forever
 from serverless_core_api.vast import VastClient
 
@@ -36,11 +37,15 @@ async def lifespan(app: FastAPI):
     idle_task = asyncio.create_task(
         idle_run_forever(app.state.vast, app.state.sb_service)
     )
+    # No-op when no model has auto_replicate=true — safe to always run.
+    replicator_task = asyncio.create_task(
+        replicator_run_forever(app.state.vast, app.state.sb_service, settings)
+    )
 
     try:
         yield
     finally:
-        for t in (poller_task, idle_task):
+        for t in (poller_task, idle_task, replicator_task):
             t.cancel()
             try:
                 await t

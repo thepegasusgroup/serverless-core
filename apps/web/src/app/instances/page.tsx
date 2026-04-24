@@ -22,6 +22,7 @@ type Instance = {
   registered_at: string | null;
   created_at: string;
   destroyed_at: string | null;
+  auto_replicated: boolean | null;
 };
 
 export default function InstancesPage() {
@@ -160,7 +161,15 @@ export default function InstancesPage() {
                       className="border-t border-zinc-800 hover:bg-zinc-900/30 transition-colors cursor-pointer"
                     >
                       <td className="px-4 py-3 font-mono text-xs text-zinc-300">
-                        {row.id.slice(0, 8)}
+                        <span>{row.id.slice(0, 8)}</span>
+                        {row.auto_replicated && (
+                          <span
+                            title="Auto-rented by the replicator"
+                            className="ml-1.5 rounded bg-blue-950/60 px-1.5 py-0.5 text-[9px] font-medium text-blue-300 ring-1 ring-inset ring-blue-900 align-middle"
+                          >
+                            auto
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex flex-col gap-1">

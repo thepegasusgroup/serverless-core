@@ -8,7 +8,7 @@ VAST_API_BASE = "https://console.vast.ai/api/v0"
 
 def build_offer_query(
     *,
-    gpu: str | None = None,
+    gpu: str | list[str] | None = None,
     max_dph: float | None = None,
     min_vram_gb: int | None = None,
     num_gpus: int = 1,
@@ -19,6 +19,7 @@ def build_offer_query(
     min_cpu_ghz: float | None = None,
     min_inet_down_mbps: int | None = None,
     datacenter_only: bool = False,
+    rental_mode: str = "on_demand",
 ) -> dict[str, Any]:
     # `limit` + `order` go INSIDE the q dict — they're part of vast's query DSL.
     # Default server-side page cap is ~64; bumping it returns the full slice
@@ -34,8 +35,16 @@ def build_offer_query(
         q["verified"] = {"eq": verified}
     if gpu:
         # vast.ai stores GPU names with spaces (e.g. "RTX 5090"); underscores
-        # are more shell-friendly so we accept either form.
-        q["gpu_name"] = {"eq": gpu.replace("_", " ")}
+        # are more shell-friendly so we accept either form. Lists become an
+        # OR across names ({"in": [...]}), broadening the candidate pool.
+        if isinstance(gpu, list):
+            names = [g.replace("_", " ") for g in gpu if g]
+            if len(names) == 1:
+                q["gpu_name"] = {"eq": names[0]}
+            elif names:
+                q["gpu_name"] = {"in": names}
+        else:
+            q["gpu_name"] = {"eq": gpu.replace("_", " ")}
     if max_dph is not None:
         q["dph_total"] = {"lt": max_dph}
     if min_vram_gb is not None:
@@ -49,6 +58,11 @@ def build_offer_query(
     if datacenter_only:
         # vast.ai uses `hosting_type` int: 0 = consumer/rig, 1 = datacenter.
         q["hosting_type"] = {"eq": 1}
+    # Ask vs bid offers are the same rows in vast's DB but priced differently.
+    # `type=bid` returns interruptible offers with spot prices; default returns
+    # guaranteed on-demand offers. Include only one flavor per search.
+    if rental_mode == "interruptible":
+        q["type"] = "bid"
     return q
 
 
@@ -91,6 +105,7 @@ class VastClient:
         disk_gb: int,
         label: str,
         onstart: str = "",
+        price: float | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "client_id": "me",
@@ -102,6 +117,9 @@ class VastClient:
         }
         if onstart:
             payload["onstart"] = onstart
+        if price is not None:
+            # Bid price in $/hr for interruptible rentals. Omit for on-demand.
+            payload["price"] = price
         r = await self._client.put(f"/asks/{offer_id}/", json=payload)
         if r.status_code >= 400:
             try:

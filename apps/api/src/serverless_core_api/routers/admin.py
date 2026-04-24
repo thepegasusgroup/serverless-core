@@ -192,6 +192,15 @@ class ModelIn(BaseModel):
     docker_image: str
     enabled: bool = True
     auto_pause_minutes: int | None = 10
+    # --- Phase A rental policy (all optional; defaults preserve M3 behaviour) ---
+    desired_replicas: int = 1
+    rental_mode: str = "on_demand"  # "on_demand" | "interruptible"
+    max_bid_dph: float | None = None
+    max_dph: float | None = None
+    num_gpus: int = 1
+    gpu_name: str | None = None
+    offer_filters: dict = {}
+    auto_replicate: bool = False
 
 
 class ModelPatch(BaseModel):
@@ -202,6 +211,14 @@ class ModelPatch(BaseModel):
     docker_image: str | None = None
     enabled: bool | None = None
     auto_pause_minutes: int | None = None
+    desired_replicas: int | None = None
+    rental_mode: str | None = None
+    max_bid_dph: float | None = None
+    max_dph: float | None = None
+    num_gpus: int | None = None
+    gpu_name: str | None = None
+    offer_filters: dict | None = None
+    auto_replicate: bool | None = None
 
 
 @router.get("/models")

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Plus, Edit3, Trash2 } from "lucide-react";
+import { Plus, Edit3, Trash2, ChevronDown, ChevronRight } from "lucide-react";
 import { api } from "@/lib/api";
 import { AppShell } from "@/components/app-shell";
 
@@ -15,6 +15,15 @@ type Model = {
   docker_image: string;
   enabled: boolean;
   auto_pause_minutes: number | null;
+  // Phase A rental policy
+  desired_replicas: number;
+  rental_mode: "on_demand" | "interruptible";
+  max_bid_dph: number | null;
+  max_dph: number | null;
+  num_gpus: number;
+  gpu_name: string | null;
+  offer_filters: Record<string, unknown>;
+  auto_replicate: boolean;
   created_at: string;
 };
 
@@ -26,7 +35,27 @@ const EMPTY: Omit<Model, "id" | "created_at"> = {
   docker_image: "",
   enabled: true,
   auto_pause_minutes: 10,
+  desired_replicas: 1,
+  rental_mode: "on_demand",
+  max_bid_dph: null,
+  max_dph: null,
+  num_gpus: 1,
+  gpu_name: null,
+  offer_filters: {},
+  auto_replicate: false,
 };
+
+function policySummary(m: Model): string {
+  const bits: string[] = [];
+  bits.push(`${m.num_gpus}× ${m.gpu_name ?? "any GPU"}`);
+  bits.push(m.rental_mode === "interruptible" ? "bid" : "on-demand");
+  if (m.rental_mode === "interruptible" && m.max_bid_dph != null) {
+    bits.push(`≤ $${m.max_bid_dph}/hr`);
+  } else if (m.max_dph != null) {
+    bits.push(`≤ $${m.max_dph}/hr`);
+  }
+  return bits.join(" · ");
+}
 
 export default function ModelsPage() {
   const [models, setModels] = useState<Model[]>([]);
@@ -98,7 +127,8 @@ export default function ModelsPage() {
               <tr>
                 <th className="px-4 py-3 text-left font-medium">slug</th>
                 <th className="px-4 py-3 text-left font-medium">hf_repo</th>
-                <th className="px-4 py-3 text-right font-medium">vram</th>
+                <th className="px-4 py-3 text-left font-medium">policy</th>
+                <th className="px-4 py-3 text-center font-medium">replicas</th>
                 <th className="px-4 py-3 text-right font-medium">idle pause</th>
                 <th className="px-4 py-3 text-left font-medium">enabled</th>
                 <th className="px-4 py-3"></th>
@@ -107,13 +137,13 @@ export default function ModelsPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-12 text-center text-zinc-500">
+                  <td colSpan={7} className="px-4 py-12 text-center text-zinc-500">
                     loading…
                   </td>
                 </tr>
               ) : models.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-12 text-center text-zinc-500">
+                  <td colSpan={7} className="px-4 py-12 text-center text-zinc-500">
                     no models — click <b>Add model</b>
                   </td>
                 </tr>
@@ -129,8 +159,24 @@ export default function ModelsPage() {
                     <td className="px-4 py-3 font-mono text-xs text-zinc-400">
                       {m.hf_repo}
                     </td>
-                    <td className="px-4 py-3 text-right text-xs tabular-nums">
-                      {m.min_vram_gb}GB
+                    <td className="px-4 py-3 text-xs text-zinc-300">
+                      {policySummary(m)}
+                    </td>
+                    <td className="px-4 py-3 text-center text-xs tabular-nums">
+                      <span
+                        className={
+                          m.auto_replicate
+                            ? "rounded bg-blue-950/60 px-2 py-0.5 text-blue-300 ring-1 ring-inset ring-blue-900"
+                            : "text-zinc-500"
+                        }
+                        title={
+                          m.auto_replicate
+                            ? "Replicator keeps this many instances live"
+                            : "Manual rentals only"
+                        }
+                      >
+                        {m.auto_replicate ? `auto ${m.desired_replicas}×` : "manual"}
+                      </span>
                     </td>
                     <td className="px-4 py-3 text-right text-xs tabular-nums text-zinc-400">
                       {m.auto_pause_minutes
@@ -231,14 +277,40 @@ function ModelDialog({
   const [autoPause, setAutoPause] = useState(
     initial.auto_pause_minutes ?? 10,
   );
+  // --- Rental policy ---
+  const [policyOpen, setPolicyOpen] = useState(false);
+  const [desiredReplicas, setDesiredReplicas] = useState(initial.desired_replicas ?? 1);
+  const [rentalMode, setRentalMode] = useState<"on_demand" | "interruptible">(
+    initial.rental_mode ?? "on_demand",
+  );
+  const [maxBidDph, setMaxBidDph] = useState<string>(
+    initial.max_bid_dph != null ? String(initial.max_bid_dph) : "",
+  );
+  const [maxDph, setMaxDph] = useState<string>(
+    initial.max_dph != null ? String(initial.max_dph) : "",
+  );
+  const [numGpus, setNumGpus] = useState(initial.num_gpus ?? 1);
+  const [gpuName, setGpuName] = useState(initial.gpu_name ?? "");
+  const [offerFilters, setOfferFilters] = useState(
+    JSON.stringify(initial.offer_filters ?? {}, null, 2),
+  );
+  const [autoReplicate, setAutoReplicate] = useState(initial.auto_replicate ?? false);
+
   const [saving, setSaving] = useState(false);
 
   const save = async () => {
     let parsedArgs: Record<string, unknown>;
+    let parsedFilters: Record<string, unknown>;
     try {
       parsedArgs = JSON.parse(vllmArgs || "{}");
     } catch (e) {
       toast.error(`vllm_args is not valid JSON: ${(e as Error).message}`);
+      return;
+    }
+    try {
+      parsedFilters = JSON.parse(offerFilters || "{}");
+    } catch (e) {
+      toast.error(`offer_filters is not valid JSON: ${(e as Error).message}`);
       return;
     }
     setSaving(true);
@@ -251,6 +323,14 @@ function ModelDialog({
         docker_image: dockerImage,
         enabled,
         auto_pause_minutes: autoPause,
+        desired_replicas: desiredReplicas,
+        rental_mode: rentalMode,
+        max_bid_dph: maxBidDph === "" ? null : parseFloat(maxBidDph),
+        max_dph: maxDph === "" ? null : parseFloat(maxDph),
+        num_gpus: numGpus,
+        gpu_name: gpuName.trim() === "" ? null : gpuName.trim(),
+        offer_filters: parsedFilters,
+        auto_replicate: autoReplicate,
       });
     } catch (e) {
       toast.error((e as Error).message);
@@ -265,7 +345,7 @@ function ModelDialog({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-xl rounded-xl border border-zinc-800 bg-zinc-950 p-5"
+        className="w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-950 p-5"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-lg font-semibold mb-4">{title}</h2>
@@ -330,7 +410,141 @@ function ModelDialog({
             />
             Enabled
           </label>
+
+          {/* ------------------ Rental policy (collapsible) ------------------ */}
+          <div className="mt-4 rounded border border-zinc-800">
+            <button
+              type="button"
+              onClick={() => setPolicyOpen((o) => !o)}
+              className="flex w-full items-center justify-between px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-900/50"
+            >
+              <span className="flex items-center gap-2">
+                {policyOpen ? (
+                  <ChevronDown className="h-3.5 w-3.5" />
+                ) : (
+                  <ChevronRight className="h-3.5 w-3.5" />
+                )}
+                Rental policy
+                <span className="text-[10px] text-zinc-500">
+                  (defaults = 1× on-demand, manual)
+                </span>
+              </span>
+              {autoReplicate && (
+                <span className="rounded bg-blue-950/60 px-2 py-0.5 text-[10px] text-blue-300 ring-1 ring-inset ring-blue-900">
+                  auto-replicate on
+                </span>
+              )}
+            </button>
+            {policyOpen && (
+              <div className="border-t border-zinc-800 p-3 space-y-3">
+                <p className="text-[11px] text-zinc-500 leading-relaxed">
+                  Controls what vast.ai offers are rented for this model and how
+                  many live replicas to keep. Defaults preserve single-instance,
+                  manual-only behaviour — you only need to touch these if you
+                  want auto-replication or interruptible bidding.
+                </p>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="GPUs per instance" hint="Multi-GPU enables --tensor-parallel-size">
+                    <input
+                      type="number"
+                      min={1}
+                      max={8}
+                      value={numGpus}
+                      onChange={(e) => setNumGpus(parseInt(e.target.value) || 1)}
+                      className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
+                    />
+                  </Field>
+                  <Field label="GPU name" hint="e.g. RTX 5090 (blank = any)">
+                    <input
+                      value={gpuName}
+                      onChange={(e) => setGpuName(e.target.value)}
+                      placeholder="any"
+                      className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm font-mono"
+                    />
+                  </Field>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Rental mode">
+                    <select
+                      value={rentalMode}
+                      onChange={(e) =>
+                        setRentalMode(e.target.value as "on_demand" | "interruptible")
+                      }
+                      className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
+                    >
+                      <option value="on_demand">on-demand (guaranteed)</option>
+                      <option value="interruptible">interruptible (bid)</option>
+                    </select>
+                  </Field>
+                  {rentalMode === "interruptible" ? (
+                    <Field label="Max bid ($/hr)" hint="blank = bid at market">
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={maxBidDph}
+                        onChange={(e) => setMaxBidDph(e.target.value)}
+                        placeholder="market"
+                        className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
+                      />
+                    </Field>
+                  ) : (
+                    <Field label="Max price ($/hr)" hint="blank = no ceiling">
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={maxDph}
+                        onChange={(e) => setMaxDph(e.target.value)}
+                        placeholder="no ceiling"
+                        className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
+                      />
+                    </Field>
+                  )}
+                </div>
+                <Field
+                  label="Extra offer filters (JSON)"
+                  hint='e.g. {"datacenter_only": true, "regions": ["eu","us"], "min_inet_down_mbps": 500}'
+                >
+                  <textarea
+                    value={offerFilters}
+                    onChange={(e) => setOfferFilters(e.target.value)}
+                    rows={4}
+                    className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs font-mono"
+                  />
+                </Field>
+                <div className="flex items-center justify-between gap-3 rounded bg-zinc-900/50 p-3">
+                  <div>
+                    <label className="flex items-center gap-2 text-sm cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={autoReplicate}
+                        onChange={(e) => setAutoReplicate(e.target.checked)}
+                        className="h-4 w-4 accent-zinc-200"
+                      />
+                      Auto-replicate
+                    </label>
+                    <p className="text-[10px] text-zinc-500 mt-0.5">
+                      When on, the replicator keeps <b>{desiredReplicas}</b> live
+                      instance{desiredReplicas === 1 ? "" : "s"} using the policy above.
+                    </p>
+                  </div>
+                  <Field label="Desired replicas">
+                    <input
+                      type="number"
+                      min={0}
+                      max={20}
+                      value={desiredReplicas}
+                      onChange={(e) =>
+                        setDesiredReplicas(parseInt(e.target.value) || 0)
+                      }
+                      className="mt-1 w-24 rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm text-right"
+                    />
+                  </Field>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
+
         <div className="mt-5 flex items-center justify-end gap-2">
           <button
             onClick={onClose}

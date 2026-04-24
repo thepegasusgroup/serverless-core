@@ -13,11 +13,20 @@ from serverless_core_api.vast import VastClient
 logger = logging.getLogger("serverless_core_api.rental")
 
 
-def _build_vllm_args(hf_repo: str, vllm_args: dict[str, Any]) -> str:
+def _build_vllm_args(
+    hf_repo: str,
+    vllm_args: dict[str, Any],
+    *,
+    num_gpus: int = 1,
+) -> str:
     parts = [f"--model {hf_repo}"]
     for key, value in (vllm_args or {}).items():
         flag = f"--{key.replace('_', '-')}"
         parts.append(f"{flag} {value}")
+    # Tensor parallelism for multi-GPU instances (e.g., 70B across 2x 5090).
+    # Only inject if the operator hasn't already set it in vllm_args.
+    if num_gpus > 1 and "tensor_parallel_size" not in (vllm_args or {}):
+        parts.append(f"--tensor-parallel-size {num_gpus}")
     return " ".join(parts)
 
 
@@ -29,6 +38,7 @@ async def rent_instance(
     vast: VastClient,
     sb: Client,
     settings: Settings,
+    auto_replicated: bool = False,
 ) -> dict[str, Any]:
     # Resolve model.
     q = sb.table("models").select("*").eq("enabled", True).limit(1)
@@ -49,8 +59,13 @@ async def rent_instance(
     # on every /v1/* call when --api-key is set, so only our proxy (which
     # stores the key) can reach the box — scanning the public IP gets 401.
     vllm_api_key = "sc_inst_" + secrets.token_urlsafe(24)
+    num_gpus = int(model.get("num_gpus") or 1)
     vllm_args = (
-        _build_vllm_args(model["hf_repo"], model.get("vllm_args") or {})
+        _build_vllm_args(
+            model["hf_repo"],
+            model.get("vllm_args") or {},
+            num_gpus=num_gpus,
+        )
         + f" --api-key {vllm_api_key}"
     )
     # vast.ai packs docker-run flags into the env dict — port mappings are
@@ -73,14 +88,26 @@ async def rent_instance(
     # + weights (15GB for 7B, more for bigger) + HF cache + tmp. 60GB was
     # consistently hitting "no space left on device" during extraction.
     disk_gb = 80
-    logger.info("Creating vast instance offer=%s label=%s disk=%sGB",
-                offer_id, label, disk_gb)
+
+    # Interruptible rentals need a bid price. We pass model.max_bid_dph through
+    # to vast as `price`; if None, vast bids at the current spot price.
+    rental_mode = model.get("rental_mode") or "on_demand"
+    bid_price: float | None = None
+    if rental_mode == "interruptible":
+        bp = model.get("max_bid_dph")
+        bid_price = float(bp) if bp is not None else None
+
+    logger.info(
+        "Creating vast instance offer=%s label=%s disk=%sGB mode=%s bid=%s gpus=%s",
+        offer_id, label, disk_gb, rental_mode, bid_price, num_gpus,
+    )
     vast_res = await vast.create_instance(
         offer_id=offer_id,
         image=model["docker_image"],
         env=env,
         disk_gb=disk_gb,
         label=label,
+        price=bid_price,
     )
     if not vast_res.get("success", False):
         raise RuntimeError(f"vast.ai rejected create: {vast_res}")
@@ -95,7 +122,15 @@ async def rent_instance(
         "model_id": model["id"],
         "status": "provisioning",
         "vllm_api_key": vllm_api_key,
-        "rent_args": {"offer_id": offer_id, "vast_response": vast_res, "label": label},
+        "auto_replicated": auto_replicated,
+        "rent_args": {
+            "offer_id": offer_id,
+            "vast_response": vast_res,
+            "label": label,
+            "rental_mode": rental_mode,
+            "bid_price": bid_price,
+            "num_gpus": num_gpus,
+        },
     }
     insert = sb.table("instances").insert(row).execute()
     logger.info("Instance row created id=%s contract=%s", instance_id, contract_id)
