@@ -233,4 +233,6 @@ In progress / next:
 
 ## License
 
-Internal / unpublished. To be decided before open-sourcing.
+Apache 2.0 — see [`LICENSE`](LICENSE).
+
+TL;DR: fork it, ship it, sell it, whatever — just keep the copyright notice and don't sue us over patents. Contributions back are welcome but not required.
