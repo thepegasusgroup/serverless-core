@@ -49,6 +49,7 @@ def _filter_offers(
     regions: list[str] | None,
     block_countries: set[str],
     bad_machine_ids: set[int],
+    bad_cpu_patterns: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     out = raw
     if regions:
@@ -61,12 +62,30 @@ def _filter_offers(
         out = [o for o in out if country_code(o) not in block_countries]
     if bad_machine_ids:
         out = [o for o in out if o.get("machine_id") not in bad_machine_ids]
+    if bad_cpu_patterns:
+        def _cpu_ok(o: dict[str, Any]) -> bool:
+            name = (o.get("cpu_name") or "").lower()
+            if not name:
+                return True  # don't reject hosts with missing CPU data
+            return not any(p in name for p in bad_cpu_patterns)
+        out = [o for o in out if _cpu_ok(o)]
     return out
 
 
 async def fetch_bad_machine_ids(sb: Client) -> set[int]:
     rows = sb.table("bad_machines").select("machine_id").execute().data or []
     return {int(r["machine_id"]) for r in rows}
+
+
+async def fetch_bad_cpu_patterns(sb: Client) -> list[str]:
+    """Return lowercased substrings of CPU names to filter out.
+
+    Matches case-insensitively against offer.cpu_name. Used to reject hosts
+    with CPUs that bottleneck Docker extraction / vLLM startup, since
+    vast.ai's min_cpu_ghz filter doesn't catch hosts where cpu_ghz is null.
+    """
+    rows = sb.table("bad_cpus").select("cpu_name").execute().data or []
+    return [(r.get("cpu_name") or "").lower() for r in rows if r.get("cpu_name")]
 
 
 async def pick_offer_for_model(
@@ -134,11 +153,13 @@ async def pick_offer_for_model(
         block_countries.discard(c.upper())
 
     bad_ids = await fetch_bad_machine_ids(sb)
+    bad_cpus = await fetch_bad_cpu_patterns(sb)
     filtered = _filter_offers(
         raw,
         regions=regions,
         block_countries=block_countries,
         bad_machine_ids=bad_ids,
+        bad_cpu_patterns=bad_cpus,
     )
     if not filtered:
         logger.info(

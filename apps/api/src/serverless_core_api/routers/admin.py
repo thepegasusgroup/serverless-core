@@ -113,6 +113,22 @@ async def list_offers(
     if bad_ids:
         raw = [o for o in raw if o.get("machine_id") not in bad_ids]
 
+    # Known-bad CPUs (Xeon Phi, weak Broadwell Xeons, etc) — substring match
+    # on cpu_name, case-insensitive.
+    bad_cpu_rows = (
+        sb.table("bad_cpus").select("cpu_name").execute().data or []
+    )
+    bad_cpu_patterns = [
+        (r.get("cpu_name") or "").lower()
+        for r in bad_cpu_rows
+        if r.get("cpu_name")
+    ]
+    if bad_cpu_patterns:
+        def _cpu_ok(o: dict) -> bool:
+            name = (o.get("cpu_name") or "").lower()
+            return not name or not any(p in name for p in bad_cpu_patterns)
+        raw = [o for o in raw if _cpu_ok(o)]
+
     offers = [Offer.from_vast(o) for o in raw]
     offers.sort(key=lambda o: o.dph)
     return offers[:limit]
