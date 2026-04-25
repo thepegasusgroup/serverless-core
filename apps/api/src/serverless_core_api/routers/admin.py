@@ -623,9 +623,13 @@ def _require_anthropic(request: Request):
 class DatasetCreate(BaseModel):
     slug: str
     label: str
+    # 'synthesis' (default) submits prompts to Claude Batch; 'eval' creates
+    # an empty dataset for manual row entry — used to track fine-tuned-model
+    # outputs + compile/runtime results while iterating v1 → v2.
+    kind: str = "synthesis"
     model: str = "claude-opus-4-7"
     system: str = ""
-    prompts: list[str]
+    prompts: list[str] = []
     # 8192 is a safer default than 4096 for code/long-JSON generation. We
     # observed 35% truncation rate at 4K on Paper plugin outputs; at 8K
     # it'd be <5%. For very long outputs (70B-spec code, multi-file projects)
@@ -639,12 +643,26 @@ class DatasetPatch(BaseModel):
     label: str | None = None
 
 
+class DatasetRowCreate(BaseModel):
+    """Manual row entry for eval-kind datasets."""
+    system: str = ""
+    user: str
+    output: str | None = None
+    meta: dict = {}
+
+
+class DatasetRowPatch(BaseModel):
+    """Update output and/or per-row eval metadata after testing the plugin."""
+    output: str | None = None
+    meta: dict | None = None
+
+
 @router.get("/datasets")
 def list_datasets(sb: Client = Depends(get_service_client)) -> list[dict]:
     return (
         sb.table("datasets")
         .select(
-            "id,slug,label,status,provider,progress_completed,progress_total,"
+            "id,slug,label,kind,status,provider,progress_completed,progress_total,"
             "progress_errored,usage,error,submitted_at,completed_at,created_at"
         )
         .order("created_at", desc=True)
@@ -665,33 +683,60 @@ async def create_dataset(
             status.HTTP_400_BAD_REQUEST,
             "Slug must be lowercase alphanumeric with dashes (1-63 chars)",
         )
-    if body.model not in SUPPORTED_MODELS:
+    if body.kind not in ("synthesis", "eval"):
         raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"Model must be one of: {', '.join(SUPPORTED_MODELS)}",
-        )
-    if not body.prompts:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "prompts cannot be empty")
-    if len(body.prompts) > 5000:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "Up to 5000 prompts per dataset in this build",
+            status.HTTP_400_BAD_REQUEST, "kind must be 'synthesis' or 'eval'"
         )
 
-    row = {
-        "slug": body.slug,
-        "label": body.label,
-        "provider": "claude_batch",
-        "status": "draft",
-        "progress_total": len(body.prompts),
-        "config": {
-            "model": body.model,
-            "system": body.system,
-            "prompts": body.prompts,
-            "max_tokens": body.max_tokens,
-            "cache_system": body.cache_system,
-        },
-    }
+    if body.kind == "synthesis":
+        if body.model not in SUPPORTED_MODELS:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"Model must be one of: {', '.join(SUPPORTED_MODELS)}",
+            )
+        if not body.prompts:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "prompts cannot be empty"
+            )
+        if len(body.prompts) > 5000:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Up to 5000 prompts per dataset in this build",
+            )
+        row = {
+            "slug": body.slug,
+            "label": body.label,
+            "kind": "synthesis",
+            "provider": "claude_batch",
+            "status": "draft",
+            "progress_total": len(body.prompts),
+            "config": {
+                "model": body.model,
+                "system": body.system,
+                "prompts": body.prompts,
+                "max_tokens": body.max_tokens,
+                "cache_system": body.cache_system,
+            },
+        }
+    else:
+        # Eval kind: no batch, no prompts. Starts at 'completed' so the UI
+        # always shows the export buttons; rows are added manually via
+        # POST /datasets/{id}/rows as you test plugins locally.
+        row = {
+            "slug": body.slug,
+            "label": body.label,
+            "kind": "eval",
+            "provider": "local_model",
+            "status": "completed",
+            "progress_total": 0,
+            "config": {
+                # Default system prompt to apply when emitting JSONL for
+                # training, in case the caller wants to paste only the user
+                # spec per row. Can be empty.
+                "system": body.system,
+            },
+        }
+
     try:
         res = sb.table("datasets").insert(row).execute()
     except Exception as e:  # noqa: BLE001 (likely unique-violation on slug)
@@ -702,7 +747,7 @@ async def create_dataset(
         )
     created = res.data[0]
 
-    if body.submit_now:
+    if body.kind == "synthesis" and body.submit_now:
         created = await _submit_dataset(created, request, sb)
     return created
 
@@ -817,7 +862,7 @@ def list_dataset_rows(
     )
     rows = (
         sb.table("dataset_rows")
-        .select("id,row_index,input,output,usage,error,created_at")
+        .select("id,row_index,input,output,usage,error,meta,created_at")
         .eq("dataset_id", dataset_id)
         .order("row_index")
         .range(offset, offset + limit - 1)
@@ -840,18 +885,38 @@ def delete_dataset(
 def export_dataset(
     dataset_id: str,
     fmt: str = Query(default="jsonl", pattern="^(jsonl|csv)$"),
+    compile: bool | None = Query(
+        default=None,
+        description="Eval filter: only include rows where meta.compile == this value",
+    ),
+    runtime: bool | None = Query(
+        default=None,
+        description="Eval filter: only include rows where meta.runtime == this value",
+    ),
     sb: Client = Depends(get_service_client),
 ):
-    """Stream the full dataset as JSONL (OpenAI-compat messages format) or CSV.
+    """Stream the dataset as JSONL (OpenAI-compat messages format) or CSV.
 
     JSONL emits {"messages": [{role:system,...}, {role:user,...}, {role:assistant,...}]}
-    per line — same shape the user showed as reference, ready for fine-tuning.
+    per line — ready for fine-tuning.
+
+    For eval-kind datasets, pass `compile=true&runtime=true` to produce a
+    clean training set containing only rows that both compiled AND ran
+    without errors. Errored/unset rows are always dropped automatically.
     """
     ds_res = sb.table("datasets").select("*").eq("id", dataset_id).limit(1).execute()
     if not ds_res.data:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Dataset not found")
     ds = ds_res.data[0]
     slug = ds["slug"]
+
+    def _meta_ok(meta: dict | None) -> bool:
+        m = meta or {}
+        if compile is not None and bool(m.get("compile")) != compile:
+            return False
+        if runtime is not None and bool(m.get("runtime")) != runtime:
+            return False
+        return True
 
     def _iter_rows():
         # Paginated fetch — 500 at a time to avoid huge payloads.
@@ -860,7 +925,7 @@ def export_dataset(
         while True:
             r = (
                 sb.table("dataset_rows")
-                .select("row_index,input,output,error")
+                .select("row_index,input,output,error,meta")
                 .eq("dataset_id", dataset_id)
                 .order("row_index")
                 .range(start, start + step - 1)
@@ -870,6 +935,8 @@ def export_dataset(
             if not chunk:
                 return
             for row in chunk:
+                if not _meta_ok(row.get("meta")):
+                    continue
                 yield row
             if len(chunk) < step:
                 return
@@ -897,11 +964,13 @@ def export_dataset(
             },
         )
 
-    # CSV: row_index, system, user, assistant, error
+    # CSV: row_index, system, user, assistant, error, meta(json)
     def _csv_gen():
         buf = io.StringIO()
         writer = csv.writer(buf)
-        writer.writerow(["row_index", "system", "user", "assistant", "error"])
+        writer.writerow(
+            ["row_index", "system", "user", "assistant", "error", "meta"]
+        )
         yield buf.getvalue()
         buf.seek(0)
         buf.truncate(0)
@@ -914,6 +983,7 @@ def export_dataset(
                     inp.get("user", ""),
                     row.get("output", "") or "",
                     row.get("error", "") or "",
+                    json.dumps(row.get("meta") or {}, ensure_ascii=False),
                 ]
             )
             yield buf.getvalue()
@@ -925,3 +995,120 @@ def export_dataset(
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{slug}.csv"'},
     )
+
+
+# -----------------------------------------------------------------------------
+# Eval-kind dataset_rows: manual add / edit / delete
+# -----------------------------------------------------------------------------
+
+
+@router.post("/datasets/{dataset_id}/rows", status_code=status.HTTP_201_CREATED)
+def create_dataset_row(
+    dataset_id: str,
+    body: DatasetRowCreate,
+    sb: Client = Depends(get_service_client),
+) -> dict:
+    """Manually add a row to an eval dataset.
+
+    Used while iterating on the fine-tuned model: paste the spec you sent,
+    the raw model output, and per-row eval metadata (compile/runtime/notes).
+    Auto-assigns the next row_index.
+    """
+    ds_res = sb.table("datasets").select("id,kind").eq("id", dataset_id).limit(1).execute()
+    if not ds_res.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Dataset not found")
+    if ds_res.data[0]["kind"] != "eval":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Rows can only be added manually to eval-kind datasets",
+        )
+
+    # Auto-increment row_index. Small race here is fine — the (dataset_id,
+    # row_index) unique constraint will make a colliding insert fail, at
+    # which point the client retries.
+    last = (
+        sb.table("dataset_rows")
+        .select("row_index")
+        .eq("dataset_id", dataset_id)
+        .order("row_index", desc=True)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    next_idx = (last[0]["row_index"] + 1) if last else 0
+
+    row = {
+        "dataset_id": dataset_id,
+        "row_index": next_idx,
+        "input": {"system": body.system, "user": body.user},
+        "output": body.output,
+        "meta": body.meta or {},
+    }
+    try:
+        res = sb.table("dataset_rows").insert(row).execute()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    if not res.data:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "insert returned nothing"
+        )
+
+    # Bump progress_total so the detail page progress readout looks right.
+    sb.table("datasets").update(
+        {"progress_total": next_idx + 1, "progress_completed": next_idx + 1}
+    ).eq("id", dataset_id).execute()
+
+    return res.data[0]
+
+
+@router.patch("/datasets/{dataset_id}/rows/{row_id}")
+def patch_dataset_row(
+    dataset_id: str,
+    row_id: str,
+    body: DatasetRowPatch,
+    sb: Client = Depends(get_service_client),
+) -> dict:
+    """Update a row's output or eval metadata (typical use: flip compile/
+    runtime flags after testing the generated plugin locally)."""
+    upd: dict = {}
+    if body.output is not None:
+        upd["output"] = body.output
+    if body.meta is not None:
+        upd["meta"] = body.meta
+    if not upd:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nothing to update")
+    res = (
+        sb.table("dataset_rows")
+        .update(upd)
+        .eq("id", row_id)
+        .eq("dataset_id", dataset_id)
+        .execute()
+    )
+    if not res.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Row not found")
+    return res.data[0]
+
+
+@router.delete("/datasets/{dataset_id}/rows/{row_id}")
+def delete_dataset_row(
+    dataset_id: str,
+    row_id: str,
+    sb: Client = Depends(get_service_client),
+) -> dict:
+    sb.table("dataset_rows").delete().eq("id", row_id).eq(
+        "dataset_id", dataset_id
+    ).execute()
+    # Refresh progress counters based on remaining row count.
+    remaining = (
+        sb.table("dataset_rows")
+        .select("id", count="exact")
+        .eq("dataset_id", dataset_id)
+        .execute()
+        .count
+        or 0
+    )
+    sb.table("datasets").update(
+        {"progress_total": remaining, "progress_completed": remaining}
+    ).eq("id", dataset_id).execute()
+    return {"ok": True}

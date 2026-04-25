@@ -13,6 +13,9 @@ type Dataset = {
   id: string;
   slug: string;
   label: string;
+  // 'synthesis' = generated via Claude Batch; 'eval' = manual entry tracking
+  // our fine-tuned model's outputs + compile/runtime results.
+  kind: "synthesis" | "eval";
   status:
     | "draft"
     | "submitting"
@@ -319,6 +322,7 @@ function CreateDatasetDialog({
   onClose: () => void;
   onCreated: () => void;
 }) {
+  const [kind, setKind] = useState<"synthesis" | "eval">("synthesis");
   const [slug, setSlug] = useState("");
   const [label, setLabel] = useState("");
   const [model, setModel] = useState(MODELS[0].id);
@@ -337,30 +341,51 @@ function CreateDatasetDialog({
     .map((s) => s.trim())
     .filter(Boolean);
 
+  const canSave =
+    !!slug.trim() &&
+    !!label.trim() &&
+    (kind === "eval" || promptList.length > 0);
+
   const save = async () => {
-    if (!slug.trim() || !label.trim() || promptList.length === 0) {
-      toast.error("Slug, label, and at least one prompt are required");
+    if (!canSave) {
+      toast.error(
+        kind === "synthesis"
+          ? "Slug, label, and at least one prompt are required"
+          : "Slug and label are required",
+      );
       return;
     }
     setSaving(true);
     try {
+      const body =
+        kind === "synthesis"
+          ? {
+              slug: slug.trim(),
+              label: label.trim(),
+              kind: "synthesis",
+              model,
+              system,
+              prompts: promptList,
+              max_tokens: maxTokens,
+              cache_system: cacheSystem,
+              submit_now: submitNow,
+            }
+          : {
+              slug: slug.trim(),
+              label: label.trim(),
+              kind: "eval",
+              system,
+            };
       await api("/admin/datasets", {
         method: "POST",
-        body: JSON.stringify({
-          slug: slug.trim(),
-          label: label.trim(),
-          model,
-          system,
-          prompts: promptList,
-          max_tokens: maxTokens,
-          cache_system: cacheSystem,
-          submit_now: submitNow,
-        }),
+        body: JSON.stringify(body),
       });
       toast.success(
-        submitNow
-          ? "Created and submitted to Anthropic"
-          : "Saved as draft",
+        kind === "eval"
+          ? "Eval dataset created — add rows manually"
+          : submitNow
+            ? "Created and submitted to Anthropic"
+            : "Saved as draft",
       );
       onCreated();
     } catch (e) {
@@ -380,6 +405,36 @@ function CreateDatasetDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-lg font-semibold mb-4">New dataset</h2>
+
+        <div className="mb-4 inline-flex rounded-lg border border-zinc-800 bg-zinc-900/60 p-0.5 text-xs">
+          <button
+            onClick={() => setKind("synthesis")}
+            className={`rounded px-3 py-1.5 ${
+              kind === "synthesis"
+                ? "bg-zinc-800 text-zinc-100"
+                : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            Synthesis (Claude Batch)
+          </button>
+          <button
+            onClick={() => setKind("eval")}
+            className={`rounded px-3 py-1.5 ${
+              kind === "eval"
+                ? "bg-zinc-800 text-zinc-100"
+                : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            Eval (manual entry)
+          </button>
+        </div>
+
+        <p className="text-xs text-zinc-500 mb-4">
+          {kind === "synthesis"
+            ? "Generate rows by submitting prompts to the Claude Batch API (50% off, shared system prompt cached)."
+            : "Create an empty dataset. Add rows manually as you test your fine-tuned model — record compile/runtime results per row, then export a filtered JSONL for v2 training."}
+        </p>
+
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <label className="block">
@@ -389,7 +444,9 @@ function CreateDatasetDialog({
               <input
                 value={slug}
                 onChange={(e) => setSlug(e.target.value)}
-                placeholder="mc-planner-v1"
+                placeholder={
+                  kind === "eval" ? "coder-v1-eval" : "mc-planner-v1"
+                }
                 className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm font-mono"
               />
               <span className="text-[10px] text-zinc-500 mt-0.5 block">
@@ -403,32 +460,40 @@ function CreateDatasetDialog({
               <input
                 value={label}
                 onChange={(e) => setLabel(e.target.value)}
-                placeholder="MC Plugin Planner v1"
+                placeholder={
+                  kind === "eval"
+                    ? "Coder v1 — eval/compile results"
+                    : "MC Plugin Planner v1"
+                }
                 className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
               />
             </label>
           </div>
 
-          <label className="block">
-            <span className="text-xs uppercase tracking-wider text-zinc-500">
-              Model
-            </span>
-            <select
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
-            >
-              {MODELS.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
-          </label>
+          {kind === "synthesis" && (
+            <label className="block">
+              <span className="text-xs uppercase tracking-wider text-zinc-500">
+                Model
+              </span>
+              <select
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
+              >
+                {MODELS.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
 
           <label className="block">
             <span className="text-xs uppercase tracking-wider text-zinc-500">
-              System prompt (shared across every row, cached after first request)
+              {kind === "synthesis"
+                ? "System prompt (shared across every row, cached after first request)"
+                : "Default system prompt (used in exports; can be left blank if rows provide their own)"}
             </span>
             <textarea
               value={system}
@@ -439,55 +504,61 @@ function CreateDatasetDialog({
             />
           </label>
 
-          <label className="block">
-            <span className="text-xs uppercase tracking-wider text-zinc-500">
-              User prompts ({promptList.length} rows) — one per line
-            </span>
-            <textarea
-              value={promptsText}
-              onChange={(e) => setPromptsText(e.target.value)}
-              rows={10}
-              placeholder={`Make a /fly command that toggles flight mode\nCreate a /heal command that restores health\n...`}
-              className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs font-mono"
-            />
-            <span className="text-[10px] text-zinc-500 mt-0.5 block">
-              Up to 5000 rows. Blank lines ignored.
-            </span>
-          </label>
+          {kind === "synthesis" && (
+            <>
+              <label className="block">
+                <span className="text-xs uppercase tracking-wider text-zinc-500">
+                  User prompts ({promptList.length} rows) — one per line
+                </span>
+                <textarea
+                  value={promptsText}
+                  onChange={(e) => setPromptsText(e.target.value)}
+                  rows={10}
+                  placeholder={`Make a /fly command that toggles flight mode\nCreate a /heal command that restores health\n...`}
+                  className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs font-mono"
+                />
+                <span className="text-[10px] text-zinc-500 mt-0.5 block">
+                  Up to 5000 rows. Blank lines ignored.
+                </span>
+              </label>
 
-          <div className="grid grid-cols-2 gap-3">
-            <label className="block">
-              <span className="text-xs uppercase tracking-wider text-zinc-500">
-                Max tokens per response
-              </span>
-              <input
-                type="number"
-                value={maxTokens}
-                onChange={(e) => setMaxTokens(parseInt(e.target.value) || 4096)}
-                className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
-              />
-            </label>
-            <div className="flex flex-col justify-end gap-2 text-sm">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={cacheSystem}
-                  onChange={(e) => setCacheSystem(e.target.checked)}
-                  className="h-4 w-4 accent-zinc-200"
-                />
-                Cache system prompt (~90% cheaper on repeats)
-              </label>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={submitNow}
-                  onChange={(e) => setSubmitNow(e.target.checked)}
-                  className="h-4 w-4 accent-zinc-200"
-                />
-                Submit immediately
-              </label>
-            </div>
-          </div>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block">
+                  <span className="text-xs uppercase tracking-wider text-zinc-500">
+                    Max tokens per response
+                  </span>
+                  <input
+                    type="number"
+                    value={maxTokens}
+                    onChange={(e) =>
+                      setMaxTokens(parseInt(e.target.value) || 4096)
+                    }
+                    className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
+                  />
+                </label>
+                <div className="flex flex-col justify-end gap-2 text-sm">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={cacheSystem}
+                      onChange={(e) => setCacheSystem(e.target.checked)}
+                      className="h-4 w-4 accent-zinc-200"
+                    />
+                    Cache system prompt (~90% cheaper on repeats)
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={submitNow}
+                      onChange={(e) => setSubmitNow(e.target.checked)}
+                      className="h-4 w-4 accent-zinc-200"
+                    />
+                    Submit immediately
+                  </label>
+                </div>
+              </div>
+            </>
+          )}
         </div>
 
         <div className="mt-5 flex items-center justify-end gap-2">
@@ -499,14 +570,16 @@ function CreateDatasetDialog({
           </button>
           <button
             onClick={save}
-            disabled={saving || !slug || !label || promptList.length === 0}
+            disabled={saving || !canSave}
             className="rounded bg-zinc-100 px-4 py-1.5 text-sm font-medium text-zinc-900 hover:bg-zinc-200 disabled:opacity-60"
           >
             {saving
               ? "Saving…"
-              : submitNow
-                ? "Create + submit"
-                : "Save as draft"}
+              : kind === "eval"
+                ? "Create eval dataset"
+                : submitNow
+                  ? "Create + submit"
+                  : "Save as draft"}
           </button>
         </div>
       </div>
