@@ -10,6 +10,16 @@ set -Eeuo pipefail
 
 VLLM_ARGS="${VLLM_ARGS:-}"
 
+# If a LoRA adapter was baked into the image (Dockerfile.baked writes the
+# snapshot path to /opt/sc-lora-path), inject --enable-lora and --lora-modules
+# automatically so the models table doesn't need to hardcode cache paths.
+if [ -f /opt/sc-lora-path ]; then
+  LORA_PATH=$(cat /opt/sc-lora-path)
+  LORA_NAME="${SC_LORA_NAME:-lora}"
+  echo "[entrypoint] baked LoRA detected: ${LORA_NAME} → ${LORA_PATH}"
+  VLLM_ARGS="${VLLM_ARGS} --enable-lora --lora-modules ${LORA_NAME}=${LORA_PATH}"
+fi
+
 echo "[entrypoint] starting vLLM with: ${VLLM_ARGS}"
 python3 -m vllm.entrypoints.openai.api_server ${VLLM_ARGS} &
 VLLM_PID=$!

@@ -1,6 +1,6 @@
 # Built from the repo root:
 #   docker build -f docker/vllm-agent/Dockerfile -t ghcr.io/thepegasusgroup/sc-vllm-agent:<sha> .
-FROM vllm/vllm-openai:latest
+FROM vllm/vllm-openai:v0.19.1
 
 # Ensure `python` resolves even though the base image only ships `python3`.
 RUN ln -sf "$(command -v python3)" /usr/local/bin/python

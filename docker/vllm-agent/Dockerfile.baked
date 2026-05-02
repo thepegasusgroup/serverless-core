@@ -25,8 +25,13 @@ FROM ${BASE_IMAGE}
 
 ARG HF_REPO
 ARG HF_REVISION=main
-# HF_TOKEN is only needed for gated repos (Llama, etc). Ungated repos like
-# Qwen work without it. Pass via --secret in build-push-action for security.
+# Optional LoRA adapter repo to bake alongside the base model.
+# When set, the adapter is cached at build time and referenced via local path
+# at runtime (no HF download needed). Leave blank for base-model-only images.
+ARG LORA_REPO=""
+ARG LORA_REVISION=main
+# HF_TOKEN is only needed for gated/private repos (Llama, private LoRAs, etc).
+# Ungated repos like Qwen work without it. Pass via --secret in build-push-action.
 ARG HF_TOKEN=""
 
 # hf_transfer saturates multi-Gbps pipes during the build. The base
@@ -153,6 +158,29 @@ snapshot_download(os.environ["HF_REPO"], revision=os.environ["HF_REVISION"],
   ignore_patterns=["*.gguf", "*.ot", "*.msgpack", "*.h5", "original/*"])
 PY
 
+# ---- Optional LoRA adapter ------------------------------------------------
+# Downloads the adapter into the HF cache if LORA_REPO is set. The resolved
+# snapshot path is written to /opt/sc-lora-path so the entrypoint (or
+# vllm_args in the models table) can reference it without knowing the cache hash.
+RUN LORA_REPO="$LORA_REPO" LORA_REVISION="$LORA_REVISION" HF_TOKEN="$HF_TOKEN" \
+    python3 - <<'PY'
+import os, json
+lora = os.environ.get("LORA_REPO", "").strip()
+if not lora:
+    print("LORA_REPO not set — skipping adapter download")
+else:
+    from huggingface_hub import snapshot_download
+    path = snapshot_download(
+        repo_id=lora,
+        revision=os.environ.get("LORA_REVISION", "main"),
+        cache_dir="/root/.cache/huggingface/hub",
+        token=os.environ.get("HF_TOKEN") or None,
+    )
+    print(f"LoRA adapter cached at: {path}")
+    with open("/opt/sc-lora-path", "w") as f:
+        f.write(path)
+PY
+
 # Tell vLLM + transformers to never hit the HF API at runtime.
 ENV HF_HUB_OFFLINE=1
 ENV TRANSFORMERS_OFFLINE=1
@@ -160,5 +188,7 @@ ENV TRANSFORMERS_OFFLINE=1
 # Audit trail inside the image.
 ENV SC_BAKED_HF_REPO=${HF_REPO}
 ENV SC_BAKED_HF_REVISION=${HF_REVISION}
+ENV SC_BAKED_LORA_REPO=${LORA_REPO}
 LABEL sc.baked.hf_repo=${HF_REPO}
 LABEL sc.baked.hf_revision=${HF_REVISION}
+LABEL sc.baked.lora_repo=${LORA_REPO}

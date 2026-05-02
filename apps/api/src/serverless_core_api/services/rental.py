@@ -22,7 +22,12 @@ def _build_vllm_args(
     parts = [f"--model {hf_repo}"]
     for key, value in (vllm_args or {}).items():
         flag = f"--{key.replace('_', '-')}"
-        parts.append(f"{flag} {value}")
+        if isinstance(value, bool):
+            # Boolean flags: --enable-lora (True) or omitted (False).
+            if value:
+                parts.append(flag)
+        else:
+            parts.append(f"{flag} {value}")
     # Tensor parallelism for multi-GPU instances (e.g., 70B across 2x 5090).
     # Only inject if the operator hasn't already set it in vllm_args.
     if num_gpus > 1 and "tensor_parallel_size" not in (vllm_args or {}):
@@ -77,6 +82,7 @@ async def rent_instance(
         "SC_AGENT_SECRET": settings.agent_shared_secret,
         "SC_INSTANCE_ID": instance_id,
         "SC_MODEL_SLUG": model["slug"],
+        "SC_LORA_NAME": model.get("lora_name") or model["slug"],
         "VLLM_ARGS": vllm_args,
     }
     if settings.hf_token:
@@ -85,9 +91,9 @@ async def rent_instance(
 
     label = f"sc-{model['slug']}-{instance_id[:8]}"
     # vLLM's image unpacks to ~35-40GB (CUDA + PyTorch + compiled kernels)
-    # + weights (15GB for 7B, more for bigger) + HF cache + tmp. 60GB was
-    # consistently hitting "no space left on device" during extraction.
-    disk_gb = 80
+    # + weights (15GB for 7B, ~65GB for 32B bf16) + HF cache + tmp.
+    # Use model-specified disk size if set, otherwise default to 80GB.
+    disk_gb = int(model.get("disk_gb") or 80)
 
     # Interruptible rentals need a bid price. We pass model.max_bid_dph through
     # to vast as `price`; if None, vast bids at the current spot price.

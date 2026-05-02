@@ -40,6 +40,11 @@ jobs:
           - slug: qwen25-7b
             hf_repo: Qwen/Qwen2.5-7B-Instruct
             hf_revision: main
+          - slug: qwen3-32b-coder-v2
+            hf_repo: Qwen/Qwen3-32B
+            hf_revision: main
+            lora_repo: ThePegasusGroup/coder-qlora-v2
+            lora_revision: main
           # Add more here, e.g.:
           # - slug: llama-3.1-8b
           #   hf_repo: meta-llama/Llama-3.1-8B-Instruct
@@ -106,6 +111,8 @@ jobs:
             BASE_IMAGE=${{ env.BASE_IMAGE }}
             HF_REPO=${{ matrix.model.hf_repo }}
             HF_REVISION=${{ matrix.model.hf_revision }}
+            LORA_REPO=${{ matrix.model.lora_repo || '' }}
+            LORA_REVISION=${{ matrix.model.lora_revision || 'main' }}
           secret-files: |
             hf_token=/tmp/secrets/hf_token
           tags: |

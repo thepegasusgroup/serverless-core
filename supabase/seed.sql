@@ -21,3 +21,22 @@ values (
   'ghcr.io/REPLACE_ME/sc-vllm-agent:latest'
 )
 on conflict (slug) do nothing;
+
+-- 3. Coder v2 — Qwen3-32B base + QLoRA adapter (trained on 1,318 plugin rows).
+--    LoRA adapter is baked into the Docker image; the entrypoint reads
+--    /opt/sc-lora-path and injects --enable-lora + --lora-modules automatically.
+--    Needs ≥48GB VRAM (80GB recommended for 32K context).
+insert into public.models (slug, hf_repo, vllm_args, min_vram_gb, docker_image)
+values (
+  'qwen3-32b-coder-v2',
+  'Qwen/Qwen3-32B',
+  '{
+    "max_model_len": 32768,
+    "gpu_memory_utilization": 0.92,
+    "dtype": "bfloat16",
+    "max_lora_rank": 64
+  }'::jsonb,
+  48,
+  'ghcr.io/REPLACE_ME/sc-vllm-agent-qwen3-32b-coder-v2:latest'
+)
+on conflict (slug) do nothing;
